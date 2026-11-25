@@ -1893,3 +1893,42 @@ mod barycentric_tests {
         assert!(pixel(&words, PERSP_CENTER).is_err());
     }
 }
+
+#[cfg(test)]
+mod mesh_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn generated_mesh_vertex_shader_is_a_parseable_dxil_container() {
+        let position = container::SigElement {
+            name: "SV_Position".into(),
+            index: 0,
+            kind: 3,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage: 0xF,
+            half: false,
+        };
+        let dxil = mesh_vs::vertex_shader(&[position], &[], 4, 0);
+        let parsed = Container::parse(&dxil).expect("generated vertex shader container");
+        assert!(parsed.part(FourCC::DXIL).is_some());
+    }
+
+    #[test]
+    fn mesh_layout_sizes_are_aligned_by_each_output_region() {
+        let layout = MeshLayout {
+            threads: 32,
+            max_vertices: 64,
+            max_primitives: 32,
+            vertex_dwords: 8,
+            primitive_dwords: 4,
+        };
+        let [vertices, indices, primitives] = layout.bytes(2);
+        assert_eq!(vertices, 64 * 2 * 8 * 4);
+        assert_eq!(indices, 32 * 2 * 3 * 4);
+        assert_eq!(primitives, 32 * 2 * 4 * 4);
+    }
+}
