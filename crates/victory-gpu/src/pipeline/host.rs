@@ -293,6 +293,14 @@ pub(crate) struct MeshFallback {
     pub(crate) outputs: [u32; 3],
     pub(crate) inputs: [u32; 3],
     pub(crate) expanded: bool,
+    /// Optional indirect command conversion; direct dispatch still works
+    /// when command-signature creation is unavailable.
+    pub(crate) indirect: Option<MeshIndirect>,
+}
+
+pub(crate) struct MeshIndirect {
+    pub(crate) regions: crate::mesh_indirect::Regions,
+    pub(crate) signatures: crate::mesh_indirect::Signatures,
 }
 
 pub(crate) struct HostPipeline {
@@ -671,7 +679,32 @@ impl HostPipeline {
                     return None;
                 }
             };
-            tracing::info!(?shaders, layout = ?f.layout, expanded = f.expanded, "mesh fallback pipeline");
+            let indirect = {
+                let regions = crate::mesh_indirect::regions(&f.layout);
+                if regions.bytes > crate::mesh_indirect::BYTES {
+                    tracing::warn!(
+                        bytes = regions.bytes,
+                        limit = crate::mesh_indirect::BYTES,
+                        "mesh fallback indirect output exceeds its fixed batch buffer"
+                    );
+                    None
+                } else {
+                    match crate::mesh_indirect::signatures(
+                        &host.device,
+                        &root,
+                        outputs,
+                        inputs[0],
+                        f.expanded,
+                    ) {
+                        Ok(signatures) => Some(MeshIndirect { regions, signatures }),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mesh fallback indirect signatures unavailable");
+                            None
+                        }
+                    }
+                }
+            };
+            tracing::info!(?shaders, layout = ?f.layout, expanded = f.expanded, indirect = indirect.is_some(), "mesh fallback pipeline");
             crate::host::name(&pso, || format!("{shaders:?} fallback graphics"));
             crate::host::name(&compute_pso, || format!("{shaders:?} fallback compute"));
             return Some(HostPipeline {
@@ -683,6 +716,7 @@ impl HostPipeline {
                     outputs,
                     inputs,
                     expanded: f.expanded,
+                    indirect,
                 }),
                 pso,
                 root,
