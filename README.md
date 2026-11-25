@@ -97,10 +97,6 @@ cargo run --release -p victory -- mesh-census "<game folder>" --list
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
 details, known limits and acceptance criteria.
 
-## License
-
-GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
-
 ### Follow-up correctness work (2026-11-25)
 
 The fallback review found that mesh output indices are local to each dispatch
@@ -116,3 +112,18 @@ These changes correct an output-addressing issue in the experimental fallback;
 they do **not** establish pixel-equivalent rendering or GTX 1050 Ti runtime
 support. Physical GPU validation and the device's shader-model/resource-binding
 capabilities remain acceptance gates.
+A second review found two runtime blockers and addressed them here:
+- the compute producer and graphics draw now use separate root signatures, so
+  mesh compute bindings with ALL visibility cannot collide with pixel-stage
+  bindings in the graphics signature;
+- sequential mesh draws reuse the data scratch pool after the preceding draw
+  transitions its output back to UAV, avoiding per-draw scratch growth toward
+  the pool budget.
+
+These changes reduce known root-signature refusal and scratch-memory exhaustion
+risks. They still need Windows CI and physical GPU validation.
+
+## License
+
+GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
+
