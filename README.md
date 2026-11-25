@@ -60,34 +60,39 @@ Diagnostics build: `cargo build --profile diag -p victory --features diagnostics
 
 ## Mesh-shader fallback progress (2026-11-25)
 
-The current renderer still requires native D3D12 mesh shaders. The GTX 1050 Ti
-does not provide that feature, so it is not supported by the current mesh
-pipeline path. Disabling the capability check would only hide the failure; it
-would not turn mesh dispatches into ordinary draws.
+The GTX 1050 Ti cannot use the native D3D12 mesh-shader pipeline. This branch
+adds an experimental compute/vertex replacement that is selected automatically
+when the host lacks native mesh-shader support. It does not disable the
+capability check or call `DispatchMesh` on unsupported hardware.
 
-The first fallback-port milestone is a read-only workload inventory:
-- Run `cargo run --release -p victory -- mesh-census "<game folder>"` to
-  count mesh programs by group size, wave size, LDS use and declared output
-  limits. Add `--list` for per-program numeric metadata.
-- See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the
-  implementation sequence, upstream references and acceptance criteria.
+The implementation includes:
+- mesh-to-compute shader emission and a generated vertex shader;
+- a direct compute dispatch followed by a conventional indexed or expanded
+  triangle draw;
+- bounded conversion of indirect mesh-dispatch records into compute and draw
+  command streams; and
+- fallback-specific scratch buffers, root bindings and resource transitions.
 
-Research has identified upstream compute/vertex fallback work in
-[PR #961](https://github.com/Marvisak/VIctory/pull/961) and a newer
-[draft port, PR #2203](https://github.com/Marvisak/VIctory/pull/2203).
-Those are useful technical references, not proof of a playable fallback.
-This repository is a separate source snapshot; the upstream patches cannot be
-safely copied wholesale. PR #2 adds the experimental compute-emission API and
-generated vertex shader. Draft PR #3 adds the direct-dispatch GPU path. Draft PR #4 adds an
-indirect-command converter and compute/draw command signatures for one-
-dimensional mesh dispatch records. **PR #3/#4 are still under CI review and
-have not been tested on a physical GPU.** Indirect records with y/z group
-counts other than 1 are explicitly skipped, and indirect output is bounded
-to a 32 MiB batch. The shader lowerer can adapt some console wave64 patterns
-to 32-lane hosts, but patterns that still require a 64-lane wave are refused.
-The GTX 1050 Ti fallback is not yet considered usable or playable. See
-[docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for status and
-acceptance gates.
+A correctness review also found that mesh output indices are local to each
+dispatch group. This branch rebases them for indexed draws, derives group
+offsets from `SV_VertexID` for expanded draws (including indirect batches),
+and carries the cumulative base vertex in indexed indirect draw arguments.
+Indirect dispatch counts above D3D12's 65,535-per-dimension limit are rejected.
+
+**The fallback is experimental and is not yet validated as playable on the
+GTX 1050 Ti.** The next acceptance gates are shader-output equivalence tests,
+DXIL/D3D12 validation, and a physical GPU run. Some wave64 programs may still
+be refused on 32-lane hardware. The GTX 1050 Ti's 4 GB VRAM may also constrain
+the temporary output buffers and the game's overall memory use.
+
+Run the read-only workload inventory with:
+
+```powershell
+cargo run --release -p victory -- mesh-census "<game folder>" --list
+```
+
+See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
+details, known limits and acceptance criteria.
 
 ## License
 
