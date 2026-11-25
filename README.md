@@ -78,11 +78,14 @@ Research has identified upstream compute/vertex fallback work in
 Those are useful technical references, not proof of a playable fallback.
 This repository is a separate source snapshot; the upstream patches cannot be
 safely copied wholesale. PR #2 adds the experimental compute-emission API and
-generated vertex shader. Draft PR #3 adds the first direct-dispatch GPU path:
-compute/graphics PSOs, output bindings, per-list scratch buffers, barriers and
-triangle draws. **PR #3 is still under CI review and has not been tested on a
-physical GPU.** Indirect mesh dispatches and wave64 behavior remain unfinished,
-so the GTX 1050 Ti fallback is not yet considered usable or playable. See
+generated vertex shader. Draft PR #3 adds the direct-dispatch GPU path. Draft PR #4 adds an
+indirect-command converter and compute/draw command signatures for one-
+dimensional mesh dispatch records. **PR #3/#4 are still under CI review and
+have not been tested on a physical GPU.** Indirect records with y/z group
+counts other than 1 are explicitly skipped, and indirect output is bounded
+to a 32 MiB batch. The shader lowerer can adapt some console wave64 patterns
+to 32-lane hosts, but patterns that still require a 64-lane wave are refused.
+The GTX 1050 Ti fallback is not yet considered usable or playable. See
 [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for status and
 acceptance gates.
 
