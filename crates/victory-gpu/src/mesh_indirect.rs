@@ -15,6 +15,8 @@ use windows::core::s;
 
 /// Maximum output bytes reserved for one indirect mesh execution batch.
 pub(crate) const BYTES: u64 = 32 << 20;
+/// D3D12's maximum dispatch group count in one dimension.
+pub(crate) const MAX_GROUPS_PER_DISPATCH: u32 = 65_535;
 /// Three root UAV addresses, then one dispatch, padded to 8-byte alignment.
 pub(crate) const COMPUTE_STRIDE: u32 = 40;
 
