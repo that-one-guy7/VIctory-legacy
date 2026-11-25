@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch; CI is green, but physical-GPU and image-equivalence validation remain outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch; the latest PR revision is awaiting CI validation, and physical-GPU/image-equivalence validation remains outstanding.**
 
 ## Why this work is needed
 
