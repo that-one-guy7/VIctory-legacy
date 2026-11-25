@@ -365,6 +365,12 @@ pub fn emit_mesh_as_compute(
             what: "a non-triangle mesh topology in the compute/vertex fallback",
         });
     }
+    if mesh.max_vertices == 0 || mesh.max_primitives == 0 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a mesh shader with zero output capacity in the compute/vertex fallback",
+        });
+    }
     lower::take_needs();
     let (compute, wave, outputs, prims) =
         emit_program_mode(c, native, p, st, io, res, true)?;
