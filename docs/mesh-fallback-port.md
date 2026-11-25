@@ -4,6 +4,31 @@
 
 ## Why this work is needed
 
+## Windows D3D12 runtime prerequisite (fixed in PR #7)
+
+The test log showed that title loading and import binding completed, but host
+D3D12 device creation failed with `0x887E0003` (invalid Agility SDK runtime
+configuration). The subsequent XDXR root-signature error was downstream of
+that host-device failure; the mesh fallback had not started executing.
+
+The executable requests Agility SDK 1.620.2 through its exported
+`D3D12SDKVersion` and `D3D12SDKPath` symbols. The matching
+`D3D12Core.dll` must be beside `victory.exe` under its app-local
+`D3D12\\` directory. PR #7 now:
+
+- stages the pinned Microsoft NuGet runtime through `cargo xtask agility`,
+  verifies the package SHA-512, and writes a version marker beside the DLLs;
+- makes `scripts/play.ps1` check that the matching runtime exists and stage it
+  automatically before starting the game;
+- adds CI that performs the actual package download/extraction, builds the
+  release executable, checks both exports with `dumpbin`, and parses the
+  PowerShell launcher.
+
+This CI passed on Windows Server 2025. It verifies packaging and executable
+configuration, not compatibility on the user's Windows 10 IoT LTSC host; that
+still needs a local launch test.
+
+
 The current host pipeline path creates a D3D12 mesh pipeline for a translated
 Xbox mesh shader and records it with
 ID3D12GraphicsCommandList6::DispatchMesh. The host capability check requires
@@ -120,8 +145,10 @@ has a compile test plus layout/stride unit tests.
   commands rather than misindexed.
 - Each indirect batch is limited to 65,535 records and a 32 MiB output region.
   The converter zeros records that would exceed the batch's group capacity.
-- This is still draft code: CI and physical-GPU validation are pending.
-  No output-equivalence or target-game rendering test has passed yet.
+- The current Windows CI run passes Clippy, the diagnostics build, the full
+  workspace test suite, Agility SDK download/hash/extraction, a Release build,
+  executable-export verification, and PowerShell launcher parsing. Physical-GPU
+  validation, output-equivalence, and target-game rendering remain outstanding.
 
 ## Wave-size handling
 
