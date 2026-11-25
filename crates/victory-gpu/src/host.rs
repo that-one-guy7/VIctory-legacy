@@ -1357,7 +1357,12 @@ impl Pool {
         len: u64,
         make: impl FnOnce(u64) -> Option<ID3D12Resource>,
     ) -> Option<ScratchRegion> {
-        let len = len.max(16).next_multiple_of(256);
+        let len = len.max(16).checked_add(255)? & !255;
+        // Bound a single allocation so an unexpectedly large game dispatch
+        // fails cleanly rather than requesting almost all of a small GPU's VRAM.
+        if len > 256 << 20 {
+            return None;
+        }
         let mut at = self.current;
         while at < self.chunks.len() {
             let (_, size, used, _) = &self.chunks[at];
@@ -1370,17 +1375,18 @@ impl Pool {
             let doubled = MESH_CHUNK_FIRST
                 .checked_shl(self.chunks.len().min(16) as u32)
                 .unwrap_or(MESH_CHUNK);
-            let size = doubled.min(MESH_CHUNK).max(len.next_power_of_two());
+            let rounded = len.checked_next_power_of_two()?;
+            let size = doubled.min(MESH_CHUNK).max(rounded);
             let held: u64 = self.chunks.iter().map(|c| c.1).sum();
             let fits = self.chunks.iter().position(|c| len <= c.1);
-            match fits {
-                Some(first) if held.saturating_add(size) > MESH_POOL_BUDGET => {
-                    for (_, _, used, _) in &mut self.chunks {
-                        *used = 0;
-                    }
-                    at = first;
+            if held.saturating_add(size) > MESH_POOL_BUDGET {
+                let first = fits?;
+                for (_, _, used, _) in &mut self.chunks {
+                    *used = 0;
                 }
-                _ => self.chunks.push((make(size)?, size, 0, false)),
+                at = first;
+            } else {
+                self.chunks.push((make(size)?, size, 0, false));
             }
         }
         self.current = at;
@@ -1396,8 +1402,10 @@ impl Pool {
     }
 
     fn reset(&mut self) {
-        for (_, _, used, touched) in &mut self.chunks {
-            (*used, *touched) = (0, false);
+        // The command list finishes every use with the buffer in UAV state.
+        // Keep that fact across list resets; only rewind its allocations.
+        for (_, _, used, _) in &mut self.chunks {
+            *used = 0;
         }
         self.current = 0;
     }
