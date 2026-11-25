@@ -288,6 +288,9 @@ impl Stage {
 
 /// The host-side pipelines and root parameters for a mesh fallback.
 pub(crate) struct MeshFallback {
+    /// Compute-only root signature; its mesh-stage parameters keep the same
+    /// indices as the graphics signature but use ALL visibility.
+    pub(crate) root: ID3D12RootSignature,
     pub(crate) compute: ID3D12PipelineState,
     pub(crate) layout: victory_shader::emit::MeshLayout,
     pub(crate) outputs: [u32; 3],
