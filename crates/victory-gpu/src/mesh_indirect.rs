@@ -23,6 +23,7 @@ pub(crate) const fn draw_stride(expanded: bool) -> u32 {
 }
 
 const SOURCE: &str = r#"
+#define COMPUTE_STRIDE 40
 #define RS "RootConstants(num32BitConstants=16, b0), UAV(u0), UAV(u1), UAV(u2)"
 cbuffer Plan : register(b0) {
     uint records; uint stride; uint counted; uint capacity;
