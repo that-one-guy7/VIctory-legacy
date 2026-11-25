@@ -1218,7 +1218,7 @@ mod tests {
         );
     }
 
-    fn targets(formats: &[DXGI_FORMAT]) -> D3D12_RT_FORMAT_ARRAY {
+    fn target_formats(formats: &[DXGI_FORMAT]) -> D3D12_RT_FORMAT_ARRAY {
         let mut targets = D3D12_RT_FORMAT_ARRAY {
             NumRenderTargets: formats.len() as u32,
             ..Default::default()
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[test]
     fn integer_render_targets_disable_blending_without_changing_other_targets() {
-        let targets = targets(&[
+        let targets = target_formats(&[
             DXGI_FORMAT_R8G8B8A8_UNORM,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             DXGI_FORMAT_R8_UINT,
@@ -1259,7 +1259,7 @@ mod tests {
     #[test]
     fn blend_states_without_active_integer_blending_are_preserved() {
         let blend = blending(false);
-        let targets = targets(&[
+        let targets = target_formats(&[
             DXGI_FORMAT_R8G8B8A8_UNORM,
             DXGI_FORMAT_R11G11B10_FLOAT,
         ]);
@@ -1267,10 +1267,10 @@ mod tests {
 
         let mut blend = blending(true);
         blend.RenderTarget[1].BlendEnable = false.into();
-        let targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT]);
+        let targets = target_formats(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT]);
         assert_eq!(host_blend(&blend, &targets), blend);
 
-        let mut targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        let mut targets = target_formats(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
         targets.RTFormats[1] = DXGI_FORMAT_R8_UINT;
         assert_eq!(host_blend(&blending(false), &targets), blending(false));
     }
