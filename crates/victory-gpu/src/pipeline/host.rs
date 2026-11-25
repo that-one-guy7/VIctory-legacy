@@ -542,6 +542,10 @@ impl HostPipeline {
                 });
             }
             bound.push(stage);
+            if index == 0 {
+                mesh_param_count = params.len();
+                mesh_sampler_count = samplers.len();
+            }
         }
         // The compute producer writes u0-u2; the generated vertex shader
         // reads the same buffers as t0-t2. Keep these in their own space.
