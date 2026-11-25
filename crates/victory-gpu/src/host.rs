@@ -1349,7 +1349,7 @@ pub(crate) struct ScratchRegion {
 
 const MESH_CHUNK_FIRST: u64 = 1 << 20;
 const MESH_CHUNK: u64 = 64 << 20;
-const MESH_POOL_BUDGET: u64 = 64 << 20;
+const MESH_POOL_BUDGET: u64 = 256 << 20;
 
 impl Pool {
     fn region(
@@ -1360,7 +1360,7 @@ impl Pool {
         let len = len.max(16).checked_add(255)? & !255;
         // Bound a single allocation so an unexpectedly large game dispatch
         // fails cleanly rather than requesting almost all of a small GPU's VRAM.
-        if len > 256 << 20 {
+        if len > (256 << 20) {
             return None;
         }
         let mut at = self.current;
