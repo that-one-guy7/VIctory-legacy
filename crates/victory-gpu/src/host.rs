@@ -1304,7 +1304,7 @@ impl Drop for Scratch {
 /// until earlier GPU reads have completed.
 #[derive(Default)]
 struct MeshScratch {
-    pools: [Pool; 1],
+    pools: [Pool; 2],
 }
 
 /// The currently implemented pool is direct-dispatch output data.
@@ -1312,6 +1312,7 @@ struct MeshScratch {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ScratchPool {
     Data = 0,
+    Commands = 1,
 }
 
 #[derive(Default)]
