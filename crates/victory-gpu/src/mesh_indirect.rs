@@ -61,7 +61,8 @@ void main() {
         uint first = used * primitives * 3;
         uint d = draws + i * (expanded != 0 ? 24 : 32);
         commands.Store2(d, at(vertices, used * vertex_bytes));
-        commands.Store4(d + 8, uint4(primitives * 3 * g, 1, first, 0));
+        uint base_vertex = used * max_vertices;
+        commands.Store4(d + 8, uint4(primitives * 3 * g, 1, first, expanded != 0 ? 0 : base_vertex));
         if (expanded == 0) {
             commands.Store(d + 24, 0);
         }
