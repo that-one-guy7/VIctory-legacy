@@ -484,7 +484,7 @@ impl HostPipeline {
                         Anonymous: D3D12_ROOT_PARAMETER1_0 {
                             Descriptor: D3D12_ROOT_DESCRIPTOR1 {
                                 ShaderRegister: u32::from(slot),
-                                RegisterSpace: ROOT_CBV_SPACE,
+                                RegisterSpace: ROOT_CBV_SPACE + space_shift,
                                 Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
                             },
                         },
