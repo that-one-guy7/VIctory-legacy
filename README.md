@@ -21,7 +21,7 @@ Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
 ## Requirements
 
 - Windows 10/11 x64, a CPU with AVX2
-- A Direct3D 12 GPU with Shader Model 6.6 and mesh-shader support for the current renderer. GPUs without mesh shaders (including the GTX 1050 Ti) cannot run mesh pipelines until the compute/vertex fallback is completed.
+- A Direct3D 12 GPU with Shader Model 6.6 and Resource Binding Tier 3 for the experimental compute/vertex mesh fallback, or native D3D12 mesh-shader support for the native path. Runtime/driver feature support must be verified on the target PC.
 - Rust (the version in `rust-toolchain.toml`)
 - Several GB of free Windows commit memory (raise the paging file if `crashes.log` reports error 1455)
 
@@ -60,68 +60,26 @@ Diagnostics build: `cargo build --profile diag -p victory --features diagnostics
 
 ## Mesh-shader fallback progress (2026-11-25)
 
-The GTX 1050 Ti cannot use the native D3D12 mesh-shader pipeline. This branch
-adds an experimental compute/vertex replacement that is selected automatically
-when the host lacks native mesh-shader support. It does not disable the
-capability check or call `DispatchMesh` on unsupported hardware.
+An experimental compute/vertex fallback is now wired into the GPU pipeline for
+adapters without native D3D12 mesh shaders. Mesh programs are lowered to
+compute shaders that write bounded output buffers; generated vertex shaders
+then render those outputs using conventional draw commands. Direct and
+indirect mesh dispatch conversion are implemented, including the console
+`DispatchMeshX` indirect entry point.
 
-The implementation includes:
-- mesh-to-compute shader emission and a generated vertex shader;
-- a direct compute dispatch followed by a conventional indexed or expanded
-  triangle draw;
-- bounded conversion of indirect mesh-dispatch records into compute and draw
-  command streams; and
-- fallback-specific scratch buffers, root bindings and resource transitions.
-
-A correctness review also found that mesh output indices are local to each
-dispatch group. This branch rebases them for indexed draws, derives group
-offsets from `SV_VertexID` for expanded draws (including indirect batches),
-and carries the cumulative base vertex in indexed indirect draw arguments.
-Indirect dispatch counts above D3D12's 65,535-per-dimension limit are rejected.
-
-**The fallback is experimental and is not yet validated as playable on the
-GTX 1050 Ti.** The next acceptance gates are shader-output equivalence tests,
-DXIL/D3D12 validation, and a physical GPU run. Some wave64 programs may still
-be refused on 32-lane hardware. The fallback also requires Shader Model 6.6
-and Resource Binding Tier 3 for the renderer's directly indexed descriptor
-heaps; startup now queries both capabilities and refuses the fallback if the
-adapter lacks either. The GTX 1050 Ti's 4 GB VRAM may also constrain temporary
-output buffers and the game's overall memory use.
-
-Run the read-only workload inventory with:
-
-```powershell
-cargo run --release -p victory -- mesh-census "<game folder>" --list
-```
+The fallback is **not yet validated as a playable configuration**. CI verifies
+the code and synthetic tests, but no physical GTX 1050 Ti run or output-image
+equivalence test has passed on this repository snapshot. Some wave64 programs
+remain unsupported, some shader translations are still refused, and the
+GTX 1050 Ti's 4 GB VRAM is a substantial constraint. Shader Model 6.6 and
+Resource Binding Tier 3 support also depend on the installed D3D12 runtime and
+driver; Windows 10 may require a suitable Agility SDK runtime.
 
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
-details, known limits and acceptance criteria.
-
-### Follow-up correctness work (2026-11-25)
-
-The fallback review found that mesh output indices are local to each dispatch
-group. A single conventional draw concatenates all groups, so those indices
-must be rebased. This branch now:
-- offsets indices for indexed direct dispatches by the group's vertex base;
-- derives the group base from `SV_VertexID` for expanded per-primitive draws,
-  including later indirect records;
-- adds the cumulative vertex base to indexed indirect draw arguments; and
-- rejects indirect compute dispatch records above D3D12's 65,535-group limit.
-
-These changes correct an output-addressing issue in the experimental fallback;
-they do **not** establish pixel-equivalent rendering or GTX 1050 Ti runtime
-support. Physical GPU validation and the device's shader-model/resource-binding
-capabilities remain acceptance gates.
-A second review found two runtime blockers and addressed them here:
-- the compute producer and graphics draw now use separate root signatures, so
-  mesh compute bindings with ALL visibility cannot collide with pixel-stage
-  bindings in the graphics signature;
-- sequential mesh draws reuse the data scratch pool after the preceding draw
-  transitions its output back to UAV, avoiding per-draw scratch growth toward
-  the pool budget.
-
-These changes reduce known root-signature refusal and scratch-memory exhaustion
-risks. They still need Windows CI and physical GPU validation.
+details, limitations, validation status, and the next acceptance gates. The
+[upstream GTX fallback PR #2203](https://github.com/Marvisak/VIctory/pull/2203)
+is a useful reference but is a separate, newer code line and is not merged
+wholesale into this repository.
 
 ## License
 
