@@ -21,7 +21,7 @@ Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
 ## Requirements
 
 - Windows 10/11 x64, a CPU with AVX2
-- A Direct3D 12 GPU with Shader Model 6.6 and mesh-shader support for the current renderer. GPUs without mesh shaders (including the GTX 1050 Ti) cannot run mesh pipelines until the compute/vertex fallback is completed.
+- A Direct3D 12 GPU. Native mesh-shader hardware is required for the stable renderer; a compute/vertex fallback is under experimental development for GPUs such as the GTX 1050 Ti and is not yet runtime-validated.
 - Rust (the version in `rust-toolchain.toml`)
 - Several GB of free Windows commit memory (raise the paging file if `crashes.log` reports error 1455)
 
@@ -60,30 +60,40 @@ Diagnostics build: `cargo build --profile diag -p victory --features diagnostics
 
 ## Mesh-shader fallback progress (2026-11-25)
 
-The current renderer still requires native D3D12 mesh shaders. The GTX 1050 Ti
-does not provide that feature, so it is not supported by the current mesh
-pipeline path. Disabling the capability check would only hide the failure; it
-would not turn mesh dispatches into ordinary draws.
+The GTX 1050 Ti does not support D3D12 mesh shaders, so it cannot execute
+the current native mesh pipeline. Disabling the capability check would only
+hide the failure; mesh dispatches must be translated into compute and draws.
 
-The first fallback-port milestone is a read-only workload inventory:
-- Run `cargo run --release -p victory -- mesh-census "<game folder>"` to
-  count mesh programs by group size, wave size, LDS use and declared output
-  limits. Add `--list` for per-program numeric metadata.
-- See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the
-  implementation sequence, upstream references and acceptance criteria.
+Completed milestones:
+- **PR #1:** added the `victory mesh-census` diagnostic. It reports native
+  mesh thread groups, wave size, LDS use and output limits.
+- **PR #2:** added an opt-in shader-emission API that converts a mesh shader
+  into a compute producer and generated vertex shader. The existing native
+  translation path remains unchanged by default.
+- **Direct dispatch branch:** now builds a compute PSO and a generated
+  vertex/pixel PSO, reserves bounded per-list UAV scratch regions, dispatches
+  the compute shader, inserts UAV/resource barriers and issues an indexed or
+  expanded triangle draw. It is automatically selected on hosts without mesh
+  shader support (or can be forced with `VICTORY_MESH_FALLBACK=1` on a
+  supported GPU for testing).
 
-Research has identified upstream compute/vertex fallback work in
-[PR #961](https://github.com/Marvisak/VIctory/pull/961) and a newer
-[draft port, PR #2203](https://github.com/Marvisak/VIctory/pull/2203).
-Those are useful technical references, not proof of a playable fallback.
-This repository is a separate source snapshot; the upstream patches cannot be
-safely copied wholesale. The experimental shader branch now adds a
-compute-emission API and generated vertex shader, but the GPU pipeline,
-scratch-buffer allocation, barriers and fallback draw path are not wired in.
-**The GTX 1050 Ti fallback is not ready to run.** See
-[docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the current
-implementation status and acceptance gates.
+**Important: the direct-dispatch path is still experimental and has not been
+validated on a real non-mesh GPU.** Indirect mesh dispatch is explicitly
+rejected for now; dynamic output counts are approximated using declared maxima
+and unused primitive indices are initialized to zero. Wave64 emulation,
+per-primitive output equivalence, VRAM pressure and actual title rendering
+still need validation. The direct path
+also caps a single scratch allocation at 256 MiB to avoid unbounded requests.
+See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the exact
+status, implementation sequence and acceptance criteria.
 
+Upstream references:
+- [Marvisak/VIctory PR #961](https://github.com/Marvisak/VIctory/pull/961)
+- [Marvisak/VIctory draft PR #2203](https://github.com/Marvisak/VIctory/pull/2203)
+
+Those PRs are technical references, not proof that this fork or the target
+game is playable on the GTX 1050 Ti. Windows CI only checks compilation,
+Clippy and tests; it does not validate D3D12 output or GPU performance.
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).

@@ -282,14 +282,28 @@ pub struct MeshLayout {
 }
 
 impl MeshLayout {
-    /// Number of bytes required in vertex, index and per-primitive buffers.
-    pub fn bytes(&self, groups: u32) -> [u64; 3] {
+    /// Number of bytes required in vertex, index and per-primitive buffers,
+    /// returning None if any multiplication would overflow.
+    pub fn checked_bytes(&self, groups: u32) -> Option<[u64; 3]> {
         let groups = u64::from(groups);
-        [
-            groups * u64::from(self.max_vertices) * u64::from(self.vertex_dwords) * 4,
-            groups * u64::from(self.max_primitives) * 12,
-            groups * u64::from(self.max_primitives) * u64::from(self.primitive_dwords) * 4,
-        ]
+        let bytes = |count: u32, stride: u32| {
+            groups
+                .checked_mul(u64::from(count))?
+                .checked_mul(u64::from(stride))?
+                .checked_mul(4)
+        };
+        Some([
+            bytes(self.max_vertices, self.vertex_dwords)?,
+            bytes(self.max_primitives, 3)?,
+            bytes(self.max_primitives, self.primitive_dwords)?,
+        ])
+    }
+
+    /// Number of bytes required in vertex, index and per-primitive buffers.
+    /// Intended for known, validated workloads; use checked_bytes for
+    /// untrusted dispatch dimensions.
+    pub fn bytes(&self, groups: u32) -> [u64; 3] {
+        self.checked_bytes(groups).expect("mesh output size overflow")
     }
 }
 
@@ -353,15 +367,24 @@ pub fn emit_mesh_as_compute(
             what: "a non-mesh program requested as a mesh fallback",
         });
     }
-    lower::take_needs();
-    let (compute, _wave, outputs, prims) =
-        emit_program_mode(c, native, p, st, io, res, true)?;
     let crate::native::StageIo::Ms(mesh) = &native.io else {
         return Err(ShaderError::Unsupported {
             offset: 0,
             what: "a mesh program with no mesh I/O description",
         });
     };
+    // The generated vertex/index path currently implements triangle lists
+    // only. Refuse strips, points and other topologies rather than drawing
+    // them with silently incorrect assembly.
+    if mesh.topology != 2 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a non-triangle mesh topology in the compute/vertex fallback",
+        });
+    }
+    lower::take_needs();
+    let (compute, _wave, outputs, prims) =
+        emit_program_mode(c, native, p, st, io, res, true)?;
     let layout = MeshLayout {
         threads: mesh.threads,
         max_vertices: mesh.max_vertices,
@@ -1879,5 +1902,38 @@ mod barycentric_tests {
         let [e0, e1] = exp_mrt0(4);
         let words = [0xC812_0000, e0, e1, S_ENDPGM];
         assert!(pixel(&words, PERSP_CENTER).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod mesh_layout_tests {
+    use super::MeshLayout;
+
+    #[test]
+    fn checked_mesh_output_sizes_include_all_three_buffers() {
+        let layout = MeshLayout {
+            threads: 32,
+            max_vertices: 64,
+            max_primitives: 32,
+            vertex_dwords: 12,
+            primitive_dwords: 4,
+        };
+        assert_eq!(
+            layout.checked_bytes(2),
+            Some([2 * 64 * 12 * 4, 2 * 32 * 3 * 4, 2 * 32 * 4 * 4])
+        );
+    }
+
+    #[test]
+    fn checked_mesh_output_sizes_reject_overflow() {
+        let layout = MeshLayout {
+            threads: u32::MAX,
+            max_vertices: u32::MAX,
+            max_primitives: u32::MAX,
+            vertex_dwords: u32::MAX,
+            primitive_dwords: u32::MAX,
+        };
+        assert_eq!(layout.checked_bytes(u32::MAX), None);
     }
 }
