@@ -79,6 +79,27 @@ not yet call this API, allocate its scratch buffers, bind both passes, insert
 barriers, or issue fallback draws. Do not use this branch as a GTX 1050 Ti
 playable build yet.
 
+## Milestone 3: direct-dispatch GPU integration (draft PR #3)
+
+The direct-dispatch draft adds the first renderer-side integration:
+
+- automatic selection on adapters without native mesh shaders, plus
+  `VICTORY_MESH_FALLBACK=1` to force the path for comparison;
+- compute and graphics pipeline states sharing a root signature, with
+  compute-stage user data/root views shifted away from pixel-stage bindings;
+- three UAV outputs and three generated-vertex SRVs in the reserved output
+  register space;
+- per-command-list default-heap scratch buffers, with explicit transitions
+  from COMMON to UAV, UAV to shader/index read, and back to UAV;
+- a direct compute dispatch followed by an indexed triangle draw, or an
+  expanded non-indexed triangle draw when per-primitive outputs are present.
+
+The draft explicitly refuses non-triangle mesh topologies. It does not yet
+handle indirect mesh dispatches. CI and physical-GPU validation are pending;
+there are no synthetic output-equivalence tests yet. This is not a playable
+build and should not be tested against the game until the PR is validated and
+merged.
+
 ## Port sequence
 
 1. **Census:** collect the actual mesh group sizes, wave64/LDS use, output
@@ -86,30 +107,28 @@ playable build yet.
    every mesh program has the same shape.
 2. **Shader lowering:** complete synthetic tests for output buffer contents,
    signatures, resource bindings and per-primitive outputs.
-3. **Pipeline creation:** build compute and vertex/pixel PSOs only when native
-   mesh shaders are unavailable or the caller explicitly requests fallback.
-   Keep the existing native path unchanged on supported GPUs.
-4. **Command recording:** allocate bounded per-list scratch buffers, dispatch
-   compute, insert UAV/transition barriers, then issue indexed or expanded
-   draws. Handle zero groups and maximum output sizes safely.
-5. **Indirect dispatch:** translate console mesh-dispatch argument records
+3. **Direct dispatch:** the draft PR builds compute and vertex/pixel PSOs,
+   allocates bounded per-list scratch buffers, inserts resource barriers and
+   issues indexed or expanded triangle draws. This still needs runtime testing.
+4. **Indirect dispatch:** translate console mesh-dispatch argument records
    into compute dispatch and draw arguments without losing count-buffer or
    ordering semantics.
-6. **Wave behavior:** verify console wave64 operations on 32-lane NVIDIA
+5. **Wave behavior:** verify console wave64 operations on 32-lane NVIDIA
    execution groups. A mesh-to-compute conversion does not automatically
    solve wave64 emulation.
-7. **Validation:** run DXIL validation, synthetic buffer/image equivalence
-   tests, workspace Clippy/tests, and a non-mesh GPU runtime test. Report the
+6. **Validation:** add synthetic buffer/image equivalence tests, run DXIL
+   validation and workspace Clippy/tests, then test on a non-mesh GPU. Report the
    exact adapter, driver, Agility runtime, VRAM/RAM, settings, frame captures
    and failure logs. Do not call the game playable based on pipeline creation
    or non-black frames alone.
 
 ## Current limitations
 
-- The GPU-side compute/vertex fallback is not wired into pipeline creation or
-  command recording.
-- The new shader-emission path is experimental and still needs synthetic
-  output-content and D3D12 validation tests on this repository's snapshot.
+- The direct-dispatch GPU path is present only in draft PR #3; CI and physical
+  GPU validation are pending.
+- Indirect mesh dispatches are not yet converted on non-mesh GPUs.
+- The shader-emission path still needs synthetic output-content and D3D12
+  validation tests on this repository's snapshot.
 - The census is a diagnostic milestone, not compatibility support.
 - The GTX 1050 Ti has 4 GB of VRAM; even a correct fallback may be limited by
   temporary output buffers, the game's broader memory footprint, shader-model
