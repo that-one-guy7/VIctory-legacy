@@ -1348,16 +1348,19 @@ impl Pool {
         if at == self.chunks.len() {
             let doubled = MESH_CHUNK_FIRST.checked_shl(self.chunks.len().min(16) as u32)?;
             let size = doubled.min(MESH_CHUNK).max(len.checked_next_power_of_two()?);
-            let held: u64 = self.chunks.iter().map(|c| c.1).sum();
+            let held = self
+                .chunks
+                .iter()
+                .fold(0u64, |sum, chunk| sum.saturating_add(chunk.1));
             let fits = self.chunks.iter().position(|c| len <= c.1);
-            match fits {
-                Some(first) if held.saturating_add(size) > MESH_POOL_BUDGET => {
-                    for (_, _, used, _) in &mut self.chunks {
-                        *used = 0;
-                    }
-                    at = first;
+            if held.saturating_add(size) > MESH_POOL_BUDGET {
+                let first = fits?;
+                for (_, _, used, _) in &mut self.chunks {
+                    *used = 0;
                 }
-                _ => self.chunks.push((make(size)?, size, 0, false)),
+                at = first;
+            } else {
+                self.chunks.push((make(size)?, size, 0, false));
             }
         }
         self.current = at;
