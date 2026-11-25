@@ -1895,3 +1895,36 @@ mod barycentric_tests {
         assert!(pixel(&words, PERSP_CENTER).is_err());
     }
 }
+
+
+#[cfg(test)]
+mod mesh_layout_tests {
+    use super::MeshLayout;
+
+    #[test]
+    fn checked_mesh_output_sizes_include_all_three_buffers() {
+        let layout = MeshLayout {
+            threads: 32,
+            max_vertices: 64,
+            max_primitives: 32,
+            vertex_dwords: 12,
+            primitive_dwords: 4,
+        };
+        assert_eq!(
+            layout.checked_bytes(2),
+            Some([2 * 64 * 12 * 4, 2 * 32 * 3 * 4, 2 * 32 * 4 * 4])
+        );
+    }
+
+    #[test]
+    fn checked_mesh_output_sizes_reject_overflow() {
+        let layout = MeshLayout {
+            threads: u32::MAX,
+            max_vertices: u32::MAX,
+            max_primitives: u32::MAX,
+            vertex_dwords: u32::MAX,
+            primitive_dwords: u32::MAX,
+        };
+        assert_eq!(layout.checked_bytes(u32::MAX), None);
+    }
+}
