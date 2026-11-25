@@ -1307,9 +1307,12 @@ struct MeshScratch {
     pools: [Pool; 1],
 }
 
-/// Data and command buffers are separate because draws read data while
-/// indirect command conversion writes command records.
-undefined
+/// The currently implemented pool is direct-dispatch output data.
+/// A separate command pool will be added with indirect mesh support.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ScratchPool {
+    Data = 0,
+}
 
 #[derive(Default)]
 struct Pool {
