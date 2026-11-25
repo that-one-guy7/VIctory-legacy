@@ -100,6 +100,14 @@ there are no synthetic output-equivalence tests yet. This is not a playable
 build and should not be tested against the game until the PR is validated and
 merged.
 
+## Wave-size handling
+
+The existing shader lowerer uses the host's maximum wave size. It can map
+certain console wave64 patterns onto 32-lane host waves when cross-lane
+operations remain within a half-wave and LDS constraints permit it. Patterns
+that still require 64 lanes are refused by the mesh fallback rather than sent
+to a host that cannot execute them. More real-title coverage is still needed.
+
 ## Port sequence
 
 1. **Census:** collect the actual mesh group sizes, wave64/LDS use, output
