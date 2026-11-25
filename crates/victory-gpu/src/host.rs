@@ -1307,8 +1307,8 @@ struct MeshScratch {
     pools: [Pool; 2],
 }
 
-/// The currently implemented pool is direct-dispatch output data.
-/// A separate command pool will be added with indirect mesh support.
+/// Separate pools keep mesh output data and indirect command streams from
+/// reusing the same regions while a command list is being recorded.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ScratchPool {
     Data = 0,
