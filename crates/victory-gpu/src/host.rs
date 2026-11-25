@@ -685,6 +685,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pool_does_not_retry_a_failed_uav_allocation_until_reset() {
+        let mut pool = Pool::default();
+        let mut attempts = 0;
+        let large = 32 << 20;
+
+        assert!(pool.region(large, true, |_| {
+            attempts += 1;
+            None
+        }).is_none());
+        assert!(pool.region(large, false, |_| {
+            attempts += 1;
+            None
+        }).is_none());
+        assert_eq!(attempts, 1, "same failed size retried before reset");
+
+        pool.reset();
+        assert!(pool.region(large, true, |_| {
+            attempts += 1;
+            None
+        }).is_none());
+        assert_eq!(attempts, 2, "reset should permit one fresh allocation attempt");
+    }
+
+    #[test]
     fn warp_adapter_accepts_only_software() {
         // This probes DXGI without creating a D3D12 device or running a title.
         // SAFETY: plain DXGI adapter queries.
@@ -1318,6 +1342,9 @@ pub(crate) enum ScratchPool {
 struct Pool {
     chunks: Vec<(ID3D12Resource, u64, u64, bool)>,
     current: usize,
+    /// Allocation sizes already refused for this command-list lifetime.
+    /// Repeated 32 MiB UAV failures must not hammer D3D12 on every mesh draw.
+    failed: std::collections::HashSet<u64>,
 }
 
 const MESH_CHUNK_FIRST: u64 = 1 << 20;
@@ -1371,7 +1398,14 @@ impl Pool {
                 }
                 at = first;
             } else {
-                self.chunks.push((make(size)?, size, 0, false));
+                if self.failed.contains(&size) {
+                    return None;
+                }
+                let Some(buffer) = make(size) else {
+                    self.failed.insert(size);
+                    return None;
+                };
+                self.chunks.push((buffer, size, 0, false));
             }
         }
         self.current = at;
@@ -1391,6 +1425,7 @@ impl Pool {
             (*used, *touched) = (0, false);
         }
         self.current = 0;
+        self.failed.clear();
     }
 }
 
