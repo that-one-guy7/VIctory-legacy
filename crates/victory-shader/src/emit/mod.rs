@@ -1452,6 +1452,7 @@ mod tests {
             outputs: Vec::new(),
             prims: Vec::new(),
             mesh_stride: 0,
+        mesh_as_compute: false,
         })
         .unwrap();
         let mut dxil = l.dxil;
