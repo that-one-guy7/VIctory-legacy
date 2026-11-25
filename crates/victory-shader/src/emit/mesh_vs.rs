@@ -69,6 +69,8 @@ pub(crate) fn vertex_shader(
     prims: &[SigElement],
     vertex_dwords: u32,
     primitive_dwords: u32,
+    max_vertices: u32,
+    max_primitives: u32,
 ) -> Vec<u8> {
     let mut s = Shader::new(false);
     s.inputs = vec![SigElement {
