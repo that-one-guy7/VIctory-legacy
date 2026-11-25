@@ -63,6 +63,9 @@ pub(crate) struct Shader {
     container: Vec<u8>,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
+    /// The mesh program lowered to compute plus a generated vertex shader.
+    #[cfg(windows)]
+    mesh_fallback: OnceLock<Option<victory_shader::emit::MeshFallback>>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -113,6 +116,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 container: bytes.to_vec(),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
+                #[cfg(windows)]
+                mesh_fallback: OnceLock::new(),
             })
         })
         .clone()
@@ -170,6 +175,32 @@ impl Shader {
             })
             .as_ref()
     }
+    
+    /// The mesh program as a compute producer plus generated vertex consumer,
+    /// translated once per shared shader container.
+    pub(crate) fn mesh_fallback(&self) -> Option<&victory_shader::emit::MeshFallback> {
+        self.mesh_fallback
+            .get_or_init(|| {
+                let done = victory_shader::emit::translate_mesh_as_compute(&self.container)
+                    .map_err(|e| e.to_string());
+                match &done {
+                    Ok(f) => tracing::info!(
+                        hash = %self.hash,
+                        layout = ?f.layout,
+                        expanded = f.expanded,
+                        "mesh shader translated as compute"
+                    ),
+                    Err(e) => tracing::warn!(
+                        hash = %self.hash,
+                        error = %e,
+                        "mesh shader does not translate as compute"
+                    ),
+                }
+                done.ok()
+            })
+            .as_ref()
+    }
+
 }
 
 #[cfg(windows)]
