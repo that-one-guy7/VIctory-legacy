@@ -1321,7 +1321,7 @@ struct Pool {
 }
 
 const MESH_CHUNK_FIRST: u64 = 1 << 20;
-const MESH_CHUNK: u64 = 64 << 20;
+const MESH_CHUNK: u64 = 4 << 20;
 const MESH_POOL_BUDGET: u64 = 64 << 20;
 
 pub(crate) struct ScratchRegion {
@@ -1334,8 +1334,19 @@ impl Pool {
     fn region(
         &mut self,
         len: u64,
+        rewind: bool,
         make: impl FnOnce(u64) -> Option<ID3D12Resource>,
     ) -> Option<ScratchRegion> {
+        // Data regions are consumed in command-list order. Each mesh draw
+        // transitions its output buffer back to UAV after the graphics read,
+        // so the next draw can safely reuse the beginning of the first
+        // sufficiently large chunk instead of allocating another region.
+        if rewind {
+            for (_, _, used, _) in &mut self.chunks {
+                *used = 0;
+            }
+            self.current = 0;
+        }
         let len = len.max(16).next_multiple_of(256);
         let mut at = self.current;
         while at < self.chunks.len() {
@@ -5091,7 +5102,7 @@ impl HostList {
     /// until reset. Buffers stay in UAV state between regions.
     pub(crate) fn mesh_scratch(&self, len: u64, pool: ScratchPool) -> Option<ScratchRegion> {
         let mut scratch = self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner());
-        scratch.pools[pool as usize].region(len, |size| {
+        scratch.pools[pool as usize].region(len, pool == ScratchPool::Data, |size| {
             let buffer = host()?.uav_buffer(size)?;
             name(&buffer, || format!("mesh fallback {pool:?} {size:#x}"));
             Some(buffer)
