@@ -401,7 +401,12 @@ impl HostPipeline {
             stages
         };
         if mesh.is_some() && fallback.is_none() && !host_device.mesh_shaders() {
-            return refuse("the host GPU has no mesh shaders (or no shader model 6.6)", shaders);
+            let reason = if !host_device.bindless_heaps() {
+                "mesh fallback requires Shader Model 6.6 and Resource Binding Tier 3 for directly indexed heaps"
+            } else {
+                "the host has no native mesh shaders and this mesh program cannot be lowered to compute"
+            };
+            return refuse(reason, shaders);
         }
         for (s, _) in &stages {
             s.translated()?;
