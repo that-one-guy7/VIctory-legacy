@@ -4094,8 +4094,30 @@ impl<'a> Lower<'a> {
         let off = self.s.m.bin(c, Bin::Add, base, dword_bytes);
         let h = self.s.mesh_out_handle(out);
         let iu = self.s.m.undef(self.s.t.i32);
+        // Mesh indices are local to their dispatch group. The fallback
+        // concatenates every group's vertices into one vertex buffer and
+        // issues one draw, so add this group's vertex-record base before
+        // storing the three indices. This also keeps the default culled
+        // triangles degenerate at the first vertex of their own group.
+        let values = if out == MESH_INDICES && self.s.prims.is_empty() {
+            // Indexed fallback draws concatenate all dispatch groups into
+            // one vertex buffer, so their indices need a per-group base.
+            // Expanded draws instead recover the group base from SV_VertexID
+            // in the generated vertex shader (also for indirect batches).
+            let vertex_base = self.s.m.bin(
+                c,
+                Bin::Mul,
+                g,
+                self.s.m.i32(mesh.max_vertices),
+            );
+            vals.iter()
+                .map(|&value| self.s.m.bin(c, Bin::Add, value, vertex_base))
+                .collect::<Vec<_>>()
+        } else {
+            vals.to_vec()
+        };
         let mut args = vec![h, off, iu];
-        args.extend_from_slice(vals);
+        args.extend_from_slice(&values);
         args.resize(7, iu);
         args.push(self.s.m.i8((1u8 << vals.len()) - 1));
         args.push(self.s.m.i32(4));
