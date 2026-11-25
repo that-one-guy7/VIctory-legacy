@@ -6,6 +6,7 @@
 mod agility;
 mod census;
 mod inspect;
+mod mesh_census;
 mod run;
 mod shader;
 mod translate;
@@ -67,6 +68,14 @@ enum Command {
         /// Also list the decoded native instructions (implies --verbose).
         #[arg(long)]
         disasm: bool,
+    },
+    /// Inventory native mesh-shader group sizes, wave sizes and output limits.
+    /// This is a read-only diagnostic; it does not implement the mesh fallback.
+    MeshCensus {
+        paths: Vec<PathBuf>,
+        /// Print one metadata line per mesh program.
+        #[arg(long)]
+        list: bool,
     },
     /// Run every shader found (containers, SGD5 files) through the
     /// translator and report what it cannot handle yet.
@@ -147,6 +156,7 @@ fn main() -> Result<()> {
             verbose,
             disasm,
         } => shader::run(paths, verbose || disasm, disasm),
+        Command::MeshCensus { paths, list } => mesh_census::run(paths, list),
         Command::Translate {
             paths,
             validate,
