@@ -50,7 +50,7 @@ void main() {
         uint z = i < n ? args.Load(i * stride + 8) : 1u;
         // The current shader lowering flattens only one-dimensional mesh
         // groups. Refuse other shapes rather than silently misindex outputs.
-        if (y != 1u || z != 1u || g > capacity - used) {
+        if (y != 1u || z != 1u || g > 65535u || g > capacity - used) {
             g = 0;
         }
         uint c = i * COMPUTE_STRIDE;
