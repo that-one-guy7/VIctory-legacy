@@ -160,12 +160,12 @@ coverage against real title shaders.
    offsets. The current draft only supports `x, 1, 1`.
 5. **Indirect dispatch:** extend optional count-buffer coverage and verify
    command ordering and output capacity.
-5. **Wave behavior:** expand tests for wave64-to-wave32 adaptation and confirm
+6. **Wave behavior:** expand tests for wave64-to-wave32 adaptation and confirm
    unsupported 64-lane programs are refused.
-6. **Title validation:** run on the target game, collect DRED/device-removal
+7. **Title validation:** run on the target game, collect DRED/device-removal
    logs, frame captures and memory usage, then verify visually correct scene
    rendering and report measured frame rate.
-7. **Performance:** tune the scratch pool and output layout only after output
+8. **Performance:** tune the scratch pool and output layout only after output
    equivalence is established; avoid sacrificing correctness for allocation
    speed.
 
