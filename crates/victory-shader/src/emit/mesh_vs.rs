@@ -69,6 +69,8 @@ pub(crate) fn vertex_shader(
     prims: &[SigElement],
     vertex_dwords: u32,
     primitive_dwords: u32,
+    max_vertices: u32,
+    max_primitives: u32,
 ) -> Vec<u8> {
     let mut s = Shader::new(false);
     s.inputs = vec![SigElement {
@@ -95,7 +97,15 @@ pub(crate) fn vertex_shader(
         let at = s.m.bin(e, Bin::Mul, id, four);
         let h = s.mesh_in_handle(1);
         let x = load(&mut s, h, at);
-        s.m.cast(e, Cast::Bitcast, x, i32t)
+        let x = s.m.cast(e, Cast::Bitcast, x, i32t);
+        // In expanded mode SV_VertexID is the absolute index-stream
+        // position. Each mesh group reserves max_primitives * 3 entries,
+        // so it identifies the group base even when a draw starts at a
+        // later indirect record's StartVertexLocation.
+        let per_group = s.m.i32(max_primitives * 3);
+        let group = s.m.bin(e, Bin::UDiv, id, per_group);
+        let base = s.m.bin(e, Bin::Mul, group, s.m.i32(max_vertices));
+        s.m.bin(e, Bin::Add, x, base)
     };
     let record = s.m.i32(vertex_dwords * 4);
     let base = s.m.bin(e, Bin::Mul, vertex, record);
