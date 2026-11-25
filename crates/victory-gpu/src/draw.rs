@@ -1840,6 +1840,11 @@ impl State {
             once!(groups, "mesh fallback draw exceeds D3D12's 32-bit draw limits");
             return false;
         };
+        const MAX_MESH_REGION: u64 = 64 << 20;
+        if region_len > MAX_MESH_REGION {
+            once!(bytes = region_len, limit = MAX_MESH_REGION, "mesh fallback output exceeds its per-list memory budget");
+            return false;
+        }
         let Some(region) = list.mesh_scratch(region_len, ScratchPool::Data) else {
             return false;
         };
