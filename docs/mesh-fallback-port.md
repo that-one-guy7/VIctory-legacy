@@ -124,7 +124,9 @@ returns both scratch pools to UAV state. A separate command pool prevents
 argument-command storage from colliding with mesh output data.
 
 **Scope limits:**
-- Only one-dimensional mesh dispatch records (`x, 1, 1`) are accepted.
+- The current direct-dispatch wrapper receives only the x group count and
+  records the fallback dispatch as `x, 1, 1`.
+- The indirect converter accepts only one-dimensional records (`x, 1, 1`).
   Records with y or z values other than 1 are zeroed rather than misindexed.
 - Each batch is limited to 65,535 records and a 32 MiB output region. Records
   that exceed the available group capacity are converted to zero-work commands.
@@ -153,9 +155,11 @@ coverage against real title shaders.
    culling and multiple groups.
 3. **Direct GPU test:** run on WARP and a non-mesh NVIDIA GPU with D3D12
    validation. Capture a known mesh draw and compare the generated result.
-4. **Indirect dispatch:** the draft converts one-dimensional records and
-   optional count buffers into compute/draw command streams. Extend coverage
-   to 2D/3D dispatch dimensions and verify count/order behavior.
+4. **Dispatch dimensions:** preserve y/z group counts for direct and indirect
+   calls by passing dimensions into compute lowering and linearizing output
+   offsets. The current draft only supports `x, 1, 1`.
+5. **Indirect dispatch:** extend optional count-buffer coverage and verify
+   command ordering and output capacity.
 5. **Wave behavior:** expand tests for wave64-to-wave32 adaptation and confirm
    unsupported 64-lane programs are refused.
 6. **Title validation:** run on the target game, collect DRED/device-removal
@@ -169,8 +173,9 @@ coverage against real title shaders.
 
 - The direct compute/vertex path is wired but experimental; it has not yet
   passed this fork's GPU runtime validation.
-- Indirect mesh fallback is limited to one-dimensional records, 65,535
-  records per batch and a 32 MiB output region; excess work is zeroed.
+- Direct fallback currently handles only x-axis group counts. Indirect mesh
+  fallback is limited to one-dimensional records, 65,535 records per batch
+  and a 32 MiB output region; excess work is zeroed.
 - Dynamic output-count equivalence is still unimplemented: the current path
   draws declared maxima and relies on zeroed unused primitive index records.
 - Synthetic output-content equivalence tests are still needed for output
