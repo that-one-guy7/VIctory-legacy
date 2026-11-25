@@ -183,3 +183,26 @@ Before enabling the fallback by default, require all of the following:
   scratch access;
 - the target game reaches a captured, visually checked scene on the GTX
   1050 Ti, with frame rate and memory usage reported honestly.
+
+## Follow-up correctness finding: group-local indices
+
+A conventional draw combines output from multiple mesh workgroups, while the
+mesh shader's index values are local to one workgroup. Treating those values
+as global vertex indices makes later groups read the first group's vertices.
+The fallback now handles this separately for both draw modes:
+
+- Indexed mode adds `groupId.x * max_vertices` when the compute shader stores
+  each group's indices. Indirect indexed draws additionally set
+  `BaseVertexLocation` to the cumulative group base for that record.
+- Expanded mode leaves the stored local indices unchanged and has the
+  generated vertex shader derive the absolute group base from
+  `SV_VertexID / (max_primitives * 3)`. This also works when an indirect
+  draw starts at a later record's `StartVertexLocation`.
+
+The indirect argument converter now zeros records whose x group count exceeds
+D3D12's 65,535 per-dimension dispatch limit. The direct fallback refuses a
+larger count before recording a dispatch.
+
+These are correctness fixes, not proof of output equivalence. The next gate is
+DXIL validation and synthetic output tests, followed by D3D12 validation on a
+non-mesh GPU. The GTX 1050 Ti remains unverified on physical hardware.
