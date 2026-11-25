@@ -4099,7 +4099,11 @@ impl<'a> Lower<'a> {
         // issues one draw, so add this group's vertex-record base before
         // storing the three indices. This also keeps the default culled
         // triangles degenerate at the first vertex of their own group.
-        let values = if out == MESH_INDICES {
+        let values = if out == MESH_INDICES && self.s.prims.is_empty() {
+            // Indexed fallback draws concatenate all dispatch groups into
+            // one vertex buffer, so their indices need a per-group base.
+            // Expanded draws instead recover the group base from SV_VertexID
+            // in the generated vertex shader (also for indirect batches).
             let vertex_base = self.s.m.bin(
                 c,
                 Bin::Mul,
