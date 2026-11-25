@@ -10467,7 +10467,7 @@ impl<'a> Lower<'a> {
         for (k, slot) in indices.iter_mut().enumerate() {
             let (shift, mask) = (self.s.m.i32(10 * k as u32), self.s.m.i32(0x3FF));
             let i = self.s.m.bin(c, Bin::LShr, x, shift);
-            let mut i = self.s.m.bin(c, Bin::And, i, mask);
+            let i = self.s.m.bin(c, Bin::And, i, mask);
             if let Some(n) = written {
                 let n = self.s.m.i32(n);
                 let past = self.s.m.cmp(c, pred::IUGE, i, n);
