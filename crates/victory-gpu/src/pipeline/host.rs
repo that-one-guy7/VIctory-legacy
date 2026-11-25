@@ -423,6 +423,8 @@ impl HostPipeline {
         let mut ranges: Vec<Box<D3D12_DESCRIPTOR_RANGE1>> = Vec::new();
         let mut samplers = Vec::new();
         let mut bound = Vec::new();
+        let mut mesh_param_count = 0usize;
+        let mut mesh_sampler_count = 0usize;
         for (index, &(shader, visibility)) in stages.iter().enumerate() {
             let t = &shader.translated()?.host;
             let shift = if fallback.is_some() && index == 0 { MESH_COMPUTE_SPACES } else { 0 };
