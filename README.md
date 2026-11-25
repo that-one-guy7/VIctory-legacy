@@ -83,6 +83,11 @@ GTX 1050 Ti's 4 GB VRAM is a substantial constraint. Shader Model 6.6 and
 Resource Binding Tier 3 support also depend on the installed D3D12 runtime and
 driver; Windows 10 may require a suitable Agility SDK runtime.
 
+When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` defaults the title's
+reported render mode to `1280x720` if `VICTORY_DISPLAY_MODE` is unset. This
+reduces render-surface pressure on low-VRAM adapters; an explicit
+`VICTORY_DISPLAY_MODE=WxH` value is preserved.
+
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
 details, limitations, validation status, and the next acceptance gates. The
 [upstream GTX fallback PR #2203](https://github.com/Marvisak/VIctory/pull/2203)
