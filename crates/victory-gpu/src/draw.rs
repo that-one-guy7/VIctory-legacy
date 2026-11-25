@@ -2386,6 +2386,7 @@ impl State {
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     /// Converts a clamped mesh-indirect argument stream to compute and draw
     /// command streams, then executes both on the fallback pipeline.
     fn execute_mesh_indirect_fallback(
