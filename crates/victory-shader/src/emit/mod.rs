@@ -1920,7 +1920,7 @@ mod mesh_fallback_tests {
             usage: 0xF,
             half: false,
         };
-        let dxil = mesh_vs::vertex_shader(&[position], &[], 4, 0);
+        let dxil = mesh_vs::vertex_shader(&[position], &[], 4, 0, 64, 32);
         let parsed = Container::parse(&dxil).expect("generated vertex shader container");
         assert!(parsed.part(FourCC::DXIL).is_some());
     }
