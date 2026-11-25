@@ -719,6 +719,8 @@ pub(crate) struct HostList {
     /// Upload memory for data the list's draws make (expanded vertices),
     /// reused after a reset.
     scratch: Mutex<Scratch>,
+    /// Device-local UAV buffers used by mesh programs run as compute.
+    mesh_scratch: Mutex<MeshScratch>,
     /// Host texture states the list assumes, by host copy: at its start and
     /// at its end. Lists are recorded on many threads and run in submission
     /// order, so the transitions from a texture's real state are made at
@@ -1294,6 +1296,90 @@ unsafe impl Send for Scratch {}
 impl Drop for Scratch {
     fn drop(&mut self) {
         give_chunks(std::mem::take(&mut self.chunks));
+    }
+}
+
+/// Device-local output memory for compute-emulated mesh draws. Kept per list:
+/// command order and each draw's barriers guarantee regions are not reused
+/// until earlier GPU reads have completed.
+#[derive(Default)]
+struct MeshScratch {
+    pools: [Pool; 2],
+}
+
+/// Data and command buffers are separate because draws read data while
+/// indirect command conversion writes command records.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ScratchPool {
+    Data = 0,
+    Commands = 1,
+}
+
+#[derive(Default)]
+struct Pool {
+    chunks: Vec<(ID3D12Resource, u64, u64, bool)>,
+    current: usize,
+}
+
+pub(crate) struct ScratchRegion {
+    pub(crate) buffer: ID3D12Resource,
+    pub(crate) offset: u64,
+    pub(crate) first: bool,
+}
+
+const MESH_CHUNK_FIRST: u64 = 1 << 20;
+const MESH_CHUNK: u64 = 64 << 20;
+const MESH_POOL_BUDGET: u64 = 64 << 20;
+
+impl Pool {
+    fn region(
+        &mut self,
+        len: u64,
+        make: impl FnOnce(u64) -> Option<ID3D12Resource>,
+    ) -> Option<ScratchRegion> {
+        let len = len.max(16).next_multiple_of(256);
+        let mut at = self.current;
+        while at < self.chunks.len() {
+            let (_, size, used, _) = &self.chunks[at];
+            if used.checked_add(len).is_some_and(|end| end <= *size) {
+                break;
+            }
+            at += 1;
+        }
+        if at == self.chunks.len() {
+            let doubled = MESH_CHUNK_FIRST
+                .checked_shl(self.chunks.len().min(16) as u32)
+                .unwrap_or(MESH_CHUNK);
+            let size = doubled.min(MESH_CHUNK).max(len.next_power_of_two());
+            let held: u64 = self.chunks.iter().map(|c| c.1).sum();
+            let fits = self.chunks.iter().position(|c| len <= c.1);
+            match fits {
+                Some(first) if held.saturating_add(size) > MESH_POOL_BUDGET => {
+                    for (_, _, used, _) in &mut self.chunks {
+                        *used = 0;
+                    }
+                    at = first;
+                }
+                _ => self.chunks.push((make(size)?, size, 0, false)),
+            }
+        }
+        self.current = at;
+        let (buffer, _, used, touched) = &mut self.chunks[at];
+        let region = ScratchRegion {
+            buffer: buffer.clone(),
+            offset: *used,
+            first: !*touched,
+        };
+        *used = used.checked_add(len)?;
+        *touched = true;
+        Some(region)
+    }
+
+    fn reset(&mut self) {
+        for (_, _, used, touched) in &mut self.chunks {
+            (*used, *touched) = (0, false);
+        }
+        self.current = 0;
     }
 }
 
@@ -2828,6 +2914,7 @@ impl Host {
                 list,
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
+                mesh_scratch: Mutex::default(),
                 states: Mutex::default(),
                 twins: Mutex::default(),
                 prelude,
@@ -4444,6 +4531,12 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        self.mesh_scratch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pools
+            .iter_mut()
+            .for_each(Pool::reset);
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -4970,6 +5063,16 @@ impl HostList {
         let at = s.used;
         s.used += len;
         Some((gpu + at, (data + at as usize) as *mut u8))
+    }
+
+    /// Reserves a device-local, shader-writable region for one fallback draw.
+    pub(crate) fn mesh_scratch(&self, len: u64, pool: ScratchPool) -> Option<ScratchRegion> {
+        let mut scratch = self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner());
+        scratch.pools[pool as usize].region(len, |size| {
+            let buffer = host()?.uav_buffer(size)?;
+            name(&buffer, || format!("mesh fallback {pool:?} {size:#x}"));
+            Some(buffer)
+        })
     }
 
     /// The bytes of scratch chunks the list holds now (after a reset:
