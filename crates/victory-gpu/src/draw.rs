@@ -1897,7 +1897,7 @@ impl State {
                     l.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: base + at_indices,
                         SizeInBytes: index_bytes,
-                        Format: DXGI_FORMAT_R32_UINT,
+                        Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
                     }));
                     l.DrawIndexedInstanced(index_count, 1, 0, 0, 0);
                 }
