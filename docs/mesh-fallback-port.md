@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental shader emitter added; GPU pipeline/dispatch integration and title validation remain incomplete.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch; CI is green, but physical-GPU and image-equivalence validation remain outstanding.**
 
 ## Why this work is needed
 
@@ -73,13 +73,13 @@ The experimental shader-emission branch adds:
 - moved user-data, root-view and sampler register spaces for the compute half
   so they do not overlap the pixel shader's bindings.
 
-This is a shader-emission API only. The normal translate() and emit() paths
-remain native and unchanged by default. The current GPU pipeline builder does
-not yet call this API, allocate its scratch buffers, bind both passes, insert
-barriers, or issue fallback draws. Do not use this branch as a GTX 1050 Ti
-playable build yet.
+The normal translate() and emit() paths remain native and unchanged by
+default. The fallback pipeline builder now consumes this API, allocates bounded
+scratch outputs, binds the compute and generated-vertex passes, inserts the
+required transitions, and issues conventional draws. This is still an
+experimental implementation, not a verified playable GTX 1050 Ti build.
 
-## Milestone 3: direct-dispatch GPU integration (draft PR #3)
+## Milestone 3: direct-dispatch GPU integration (implemented in PR #7)
 
 The direct-dispatch draft adds the first renderer-side integration:
 
@@ -94,13 +94,11 @@ The direct-dispatch draft adds the first renderer-side integration:
 - a direct compute dispatch followed by an indexed triangle draw, or an
   expanded non-indexed triangle draw when per-primitive outputs are present.
 
-The draft explicitly refuses non-triangle mesh topologies. It does not yet
-handle indirect mesh dispatches. CI and physical-GPU validation are pending;
-there are no synthetic output-equivalence tests yet. This is not a playable
-build and should not be tested against the game until the PR is validated and
-merged.
+The implementation explicitly refuses non-triangle mesh topologies. The
+fallback is covered by synthetic layout/argument tests and Windows CI, but
+physical-GPU and output-equivalence validation are still outstanding.
 
-## Milestone 4: indirect dispatch conversion (draft PR #4)
+## Milestone 4: indirect dispatch conversion (implemented in PR #7)
 
 The indirect path now has a separate argument-conversion compute pass. The
 existing indirect clamp first bounds the title's argument records; the new
@@ -144,9 +142,9 @@ This behavior needs more coverage tests against real title shaders.
 3. **Direct dispatch:** the draft PR builds compute and vertex/pixel PSOs,
    allocates bounded per-list scratch buffers, inserts resource barriers and
    issues indexed or expanded triangle draws. This still needs runtime testing.
-4. **Indirect dispatch:** translate console mesh-dispatch argument records
-   into compute dispatch and draw arguments without losing count-buffer or
-   ordering semantics.
+4. **Indirect dispatch:** implemented for bounded one-dimensional records,
+   including the console `DispatchMeshX` callback; extend coverage for title
+   variants and verify ordering on hardware.
 5. **Wave behavior:** expand tests for the existing wave64-to-wave32 lowering,
    and confirm that unsupported 64-lane patterns are refused.
 6. **Validation:** add synthetic buffer/image equivalence tests, run DXIL
@@ -157,10 +155,12 @@ This behavior needs more coverage tests against real title shaders.
 
 ## Current limitations
 
-- The direct-dispatch GPU path is present only in draft PR #3; CI and physical
-  GPU validation are pending.
+- Direct and indirect GPU fallback paths are implemented in PR #7; Windows CI
+  passes, but physical-GPU validation remains outstanding.
 - Indirect fallback is limited to one-dimensional records, 65,535 records per
-  batch, and a 32 MiB output region; excess work is zeroed.
+  batch, and a bounded output region; excess work is zeroed.
+- Console `DispatchMeshX` indirect calls now route into the existing mesh
+  `ExecuteIndirect` path rather than being discarded.
 - No synthetic output-content/image-equivalence or physical GPU test has
   passed on this repository's snapshot.
 - Some mesh shaders still require wave64 and are refused on 32-lane hosts.
@@ -196,8 +196,8 @@ The per-list data scratch pool now rewinds its allocation cursor before each
 sequential mesh fallback output allocation. This is safe only because each
 direct or indirect fallback path records the output read and transitions the
 buffer back to UAV before the next allocation can overwrite it. The pool keeps
-its bounded 64 MiB budget and uses 4 MiB growth chunks (larger individual
-allocations are still sized to fit).
+a bounded budget and uses 4 MiB growth chunks (larger individual allocations
+are still sized to fit).
 
 These changes address two known causes of real-device failure: invalid root
 signatures and scratch-buffer growth across thousands of mesh draws. They do
@@ -235,6 +235,13 @@ The fallback now handles this separately for both draw modes:
 The indirect argument converter now zeros records whose x group count exceeds
 D3D12's 65,535 per-dimension dispatch limit. The direct fallback refuses a
 larger count before recording a dispatch.
+
+The console `DispatchMeshX` callback now routes non-zero indirect argument
+addresses through the existing mesh `ExecuteIndirect` path (kind 10, 12-byte
+group-count records). That path clamps the title's argument records and
+selects the compute/vertex fallback when the active host pipeline requires it.
+Previously these calls were logged and dropped, which could prevent world
+geometry work from being submitted at all.
 
 These are correctness fixes, not proof of output equivalence. The next gate is
 DXIL validation and synthetic output tests, followed by D3D12 validation on a
