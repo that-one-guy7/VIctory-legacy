@@ -353,15 +353,21 @@ pub fn emit_mesh_as_compute(
             what: "a non-mesh program requested as a mesh fallback",
         });
     }
-    lower::take_needs();
-    let (compute, _wave, outputs, prims) =
-        emit_program_mode(c, native, p, st, io, res, true)?;
     let crate::native::StageIo::Ms(mesh) = &native.io else {
         return Err(ShaderError::Unsupported {
             offset: 0,
             what: "a mesh program with no mesh I/O description",
         });
     };
+    if mesh.topology != 2 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a non-triangle mesh topology in the compute/vertex fallback",
+        });
+    }
+    lower::take_needs();
+    let (compute, _wave, outputs, prims) =
+        emit_program_mode(c, native, p, st, io, res, true)?;
     let layout = MeshLayout {
         threads: mesh.threads,
         max_vertices: mesh.max_vertices,
