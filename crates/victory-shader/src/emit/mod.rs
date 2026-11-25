@@ -394,6 +394,8 @@ pub fn emit_mesh_as_compute(
             &prims,
             layout.vertex_dwords,
             layout.primitive_dwords,
+            layout.max_vertices,
+            layout.max_primitives,
         ),
         user_data: Vec::new(),
         samplers: Vec::new(),
