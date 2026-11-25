@@ -269,7 +269,7 @@ pub(crate) fn plan(
         pl,
         ph,
         draws,
-        0,
+        layout.max_vertices,
     ]
 }
 
