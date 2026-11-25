@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: investigation and workload census; compute/vertex fallback not yet implemented.**
+**Status: experimental shader emitter added; GPU pipeline/dispatch integration and title validation remain incomplete.**
 
 ## Why this work is needed
 
@@ -37,9 +37,9 @@ substantially, so copying either patch as a whole is not a safe mechanical
 cherry-pick. Port each layer against this tree and preserve its existing
 memory, descriptors, command-list, and shader-cache behavior.
 
-## First milestone: inventory the workload
+## Milestone 1: workload inventory
 
-The new victory mesh-census command walks the user-supplied paths (or the
+The victory mesh-census command walks the user-supplied paths (or the
 configured game/test paths) and reports aggregate native mesh-program facts:
 
 - thread-group sizes;
@@ -55,46 +55,66 @@ cargo run --release -p victory -- mesh-census "<game folder>"
 
 Add --list to print one metadata line per discovered mesh program. The
 command does not print shader code, save extracted assets, validate a host
-pipeline, or prove that a fallback can run. It also only sees shader
-containers the existing scanner can reach (raw DXBC and supported, unpacked
-SGD5 records); encrypted or otherwise unsupported archives are outside its
-coverage.
+pipeline, or prove that a fallback can run. It only sees shader containers
+the existing scanner can reach (raw DXBC and supported, unpacked SGD5 records);
+encrypted or otherwise unsupported archives are outside its coverage.
+
+## Milestone 2: shader-side compute conversion (experimental)
+
+The experimental shader-emission branch adds:
+
+- a MeshFallback result with a compute shader, generated vertex shader,
+  output layout, and a flag for per-primitive-output expansion;
+- compute-mode lowering of the existing mesh program, retaining the normal
+  instruction translator while redirecting vertex, index and per-primitive
+  output records to three raw UAV buffers in register space 2;
+- a generated vertex shader that reads those records and restores the mesh
+  output signature for the existing pixel shader;
+- moved user-data, root-view and sampler register spaces for the compute half
+  so they do not overlap the pixel shader's bindings.
+
+This is a shader-emission API only. The normal translate() and emit() paths
+remain native and unchanged by default. The current GPU pipeline builder does
+not yet call this API, allocate its scratch buffers, bind both passes, insert
+barriers, or issue fallback draws. Do not use this branch as a GTX 1050 Ti
+playable build yet.
 
 ## Port sequence
 
 1. **Census:** collect the actual mesh group sizes, wave64/LDS use, output
    limits and translation refusal reasons from the target title. Do not assume
    every mesh program has the same shape.
-2. **Shader lowering:** introduce an explicit fallback result containing a
-   compute shader, a generated vertex shader, and a precise output-buffer
-   layout. Preserve user data, root views, descriptor heap accesses, pixel
-   semantics, per-primitive outputs, vertex/primitive bounds and group IDs.
-3. **Pipeline creation:** build the compute and vertex/pixel PSOs only when
-   native mesh shaders are unavailable or the caller explicitly requests the
-   fallback. Keep the existing native path unchanged on supported GPUs.
+2. **Shader lowering:** complete synthetic tests for output buffer contents,
+   signatures, resource bindings and per-primitive outputs.
+3. **Pipeline creation:** build compute and vertex/pixel PSOs only when native
+   mesh shaders are unavailable or the caller explicitly requests fallback.
+   Keep the existing native path unchanged on supported GPUs.
 4. **Command recording:** allocate bounded per-list scratch buffers, dispatch
-   compute, insert the required UAV/transition barriers, then issue indexed
-   or expanded draws. Handle zero groups and maximum output sizes safely.
+   compute, insert UAV/transition barriers, then issue indexed or expanded
+   draws. Handle zero groups and maximum output sizes safely.
 5. **Indirect dispatch:** translate console mesh-dispatch argument records
    into compute dispatch and draw arguments without losing count-buffer or
    ordering semantics.
 6. **Wave behavior:** verify console wave64 operations on 32-lane NVIDIA
    execution groups. A mesh-to-compute conversion does not automatically
    solve wave64 emulation.
-7. **Validation:** add synthetic buffer-content and image-equivalence tests,
-   run workspace Clippy/tests, then test on a non-mesh GPU. Report the exact
-   adapter, driver, Agility runtime, VRAM/RAM, settings, frame captures and
-   failure logs. Do not call the game playable based on pipeline creation or
-   non-black frames alone.
+7. **Validation:** run DXIL validation, synthetic buffer/image equivalence
+   tests, workspace Clippy/tests, and a non-mesh GPU runtime test. Report the
+   exact adapter, driver, Agility runtime, VRAM/RAM, settings, frame captures
+   and failure logs. Do not call the game playable based on pipeline creation
+   or non-black frames alone.
 
 ## Current limitations
 
-- No compute/vertex fallback is present in this repository yet.
+- The GPU-side compute/vertex fallback is not wired into pipeline creation or
+  command recording.
+- The new shader-emission path is experimental and still needs synthetic
+  output-content and D3D12 validation tests on this repository's snapshot.
 - The census is a diagnostic milestone, not compatibility support.
 - The GTX 1050 Ti has 4 GB of VRAM; even a correct fallback may be limited by
   temporary output buffers, the game's broader memory footprint, shader-model
   features and CPU/GPU translation costs.
-- The upstream synthetic-test results do not guarantee the target title will
+- Upstream synthetic-test results do not guarantee the target title will
   render correctly or perform acceptably on this machine.
 
 ## Next acceptance gate
