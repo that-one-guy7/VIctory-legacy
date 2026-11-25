@@ -1,14 +1,15 @@
 //! The D3D12 Agility SDK: which D3D12 runtime the host uses.
 //!
-//! Windows 10's in-box runtime stops at shader model 6.5 and refuses root
-//! signatures that index the descriptor heaps directly (flags 0x400, 0x800),
-//! which every translated pipeline uses. D3D12 looks for these two exports on
-//! the process's executable; when they name a runtime newer than the
-//! system's, it loads `D3D12Core.dll` from `D3D12SDKPath` (relative to the
-//! executable) instead. `cargo xtask agility` puts it there. Without the
-//! folder, or on a system whose runtime is newer, the in-box one is used.
+//! Windows 10's in-box runtime may stop at shader model 6.5 and refuse root
+//! signatures that index descriptor heaps directly (flags 0x400, 0x800).
+//! These exports opt the process into the pinned Agility SDK runtime. When the
+//! in-box runtime is newer than the requested SDK, Windows uses its newer
+//! runtime. Otherwise, the matching app-local D3D12Core.dll must exist under
+//! the path below; a missing or mismatched DLL makes D3D12CreateDevice fail
+//! with D3D12_ERROR_INVALID_REDIST (0x887E0003). Run `cargo xtask agility`
+//! to download, hash-check, and stage the pinned runtime.
 //!
-//! `build.rs` exports both symbols.
+//! `build.rs` exports both symbols from the executable.
 #![allow(non_upper_case_globals)]
 
 /// The runtime's SDK version: the minor number of the

@@ -31,3 +31,64 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+      # Exercise the real pinned NuGet download, SHA-512 check, extraction,
+      # app-local layout, and executable exports on the Windows runner.
+      - name: Stage D3D12 Agility SDK
+        run: cargo xtask agility --target-dir target
+      - name: Build release executable
+        run: cargo build --release -p victory --locked
+      - name: Verify Agility runtime, executable exports, and launcher syntax
+        shell: pwsh
+        run: |
+          $runtime = "target\release\D3D12"
+          foreach ($file in @("D3D12Core.dll", "d3d12SDKLayers.dll", "VICTORY_AGILITY_SDK_VERSION")) {
+            if (!(Test-Path -LiteralPath (Join-Path $runtime $file) -PathType Leaf)) {
+              throw "Agility SDK staging did not produce $runtime\$file"
+            }
+          }
+          $sdkVersion = (Get-Content -LiteralPath (Join-Path $runtime "VICTORY_AGILITY_SDK_VERSION") -Raw).Trim()
+          if ($sdkVersion -ne "1.620.2") {
+            throw "Unexpected staged Agility SDK version: $sdkVersion"
+          }
+
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts\play.ps1"),
+            [ref]$tokens,
+            [ref]$parseErrors
+          )
+          if ($parseErrors.Count -gt 0) {
+            throw ($parseErrors | Out-String)
+          }
+
+          $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+          if (!$dumpbin) {
+            $vswhere = Join-Path "${env:ProgramFiles(x86)}" "Microsoft Visual Studio\Installer\vswhere.exe"
+            if (!(Test-Path -LiteralPath $vswhere)) {
+              throw "Cannot locate vswhere.exe to verify victory.exe exports"
+            }
+            $vs = & $vswhere -latest -products "*" -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($LASTEXITCODE -ne 0 -or !$vs) {
+              throw "Cannot locate the Visual Studio C++ tools"
+            }
+            $dumpbinFile = Get-ChildItem -LiteralPath (Join-Path $vs "VC\Tools\MSVC") -Filter dumpbin.exe -Recurse |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if (!$dumpbinFile) {
+              throw "dumpbin.exe was not found in the Visual Studio C++ tools"
+            }
+            $dumpbinPath = $dumpbinFile.FullName
+          } else {
+            $dumpbinPath = $dumpbin.Source
+          }
+          $exports = (& $dumpbinPath /exports "target\release\victory.exe" 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin could not read target\release\victory.exe"
+          }
+          foreach ($symbol in @("D3D12SDKVersion", "D3D12SDKPath")) {
+            if ($exports -notmatch [regex]::Escape($symbol)) {
+              throw "victory.exe does not export required Agility symbol $symbol"
+            }
+          }
+          Write-Host "Verified Agility SDK 1.620.2 files, both executable exports, and PowerShell launcher syntax."

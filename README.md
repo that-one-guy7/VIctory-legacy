@@ -31,6 +31,14 @@ Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
 cargo build --release -p victory
 ```
 
+The executable is configured for D3D12 Agility SDK **1.620.2**. The first
+launch through `scripts/play.ps1` checks that the matching app-local runtime
+is beside `victory.exe` and runs `cargo xtask agility` if it is missing.
+That command downloads the pinned Microsoft NuGet package and verifies its
+SHA-512 before staging the runtime. Internet access is needed for the first
+staging run. When launching `victory.exe` directly, run
+`cargo xtask agility` from the repository root first.
+
 ## Play
 
 ```powershell
