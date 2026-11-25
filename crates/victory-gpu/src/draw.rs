@@ -1897,7 +1897,7 @@ impl State {
                         SizeInBytes: index_bytes,
                         Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
                     }));
-                    command_list.DrawIndexedInstanced(draw_vertices, 1, 0, 0, 0, 0);
+                    command_list.DrawIndexedInstanced(draw_vertices, 1, 0, 0, 0);
                 }
             }
             self.mesh_scissor(list, false);
