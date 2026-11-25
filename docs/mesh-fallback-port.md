@@ -109,6 +109,41 @@ rejected until its argument conversion, count handling and indirect command
 signatures are ported. The branch has not yet passed CI or a real GPU runtime
 test, so do not treat it as a playable GTX 1050 Ti build.
 
+## Milestone 4: indirect mesh dispatch conversion (draft PR #6)
+
+The indirect path first uses the existing clamp pass to bound the title's
+argument records and apply the optional count buffer. A new Shader Model 5.1
+compute pass then reads those bounded records and writes two command streams:
+
+- compute commands: three output UAV addresses plus a `Dispatch`;
+- draw commands: the generated vertex SRV plus `Draw` or `DrawIndexed`.
+
+The fallback executes the compute command signature, transitions the output
+region for vertex/index reads, executes the draw command signature, then
+returns both scratch pools to UAV state. A separate command pool prevents
+argument-command storage from colliding with mesh output data.
+
+**Scope limits:**
+- Only one-dimensional mesh dispatch records (`x, 1, 1`) are accepted.
+  Records with y or z values other than 1 are zeroed rather than misindexed.
+- Each batch is limited to 65,535 records and a 32 MiB output region. Records
+  that exceed the available group capacity are converted to zero-work commands.
+- The existing clamp applies optional count buffers before conversion.
+- The converter HLSL has a Shader Model 5.1 compile test; command strides and
+  output-region sizing have unit tests. These tests do not prove rendering
+  equivalence.
+
+This remains draft code pending Windows CI and physical-GPU testing. It is not
+a playable GTX 1050 Ti build.
+
+## Wave-size handling
+
+The existing lowerer uses the host's maximum wave size and can adapt certain
+console wave64 patterns to 32-lane hosts when cross-lane operations remain
+within a half-wave and LDS constraints permit it. Mesh programs that still
+require a 64-lane host wave are refused by the fallback. This needs additional
+coverage against real title shaders.
+
 ## Port sequence
 
 1. **Compile and validate:** run the Windows workspace Clippy and test jobs.
@@ -118,11 +153,11 @@ test, so do not treat it as a playable GTX 1050 Ti build.
    culling and multiple groups.
 3. **Direct GPU test:** run on WARP and a non-mesh NVIDIA GPU with D3D12
    validation. Capture a known mesh draw and compare the generated result.
-4. **Indirect dispatch:** translate console mesh-dispatch argument records,
-   optional count buffers and draw records while preserving ordering.
-5. **Wave behavior:** verify console wave64 operations on 32-lane NVIDIA
-   execution groups. Mesh-to-compute conversion does not automatically solve
-   wave64 emulation.
+4. **Indirect dispatch:** the draft converts one-dimensional records and
+   optional count buffers into compute/draw command streams. Extend coverage
+   to 2D/3D dispatch dimensions and verify count/order behavior.
+5. **Wave behavior:** expand tests for wave64-to-wave32 adaptation and confirm
+   unsupported 64-lane programs are refused.
 6. **Title validation:** run on the target game, collect DRED/device-removal
    logs, frame captures and memory usage, then verify visually correct scene
    rendering and report measured frame rate.
@@ -134,12 +169,13 @@ test, so do not treat it as a playable GTX 1050 Ti build.
 
 - The direct compute/vertex path is wired but experimental; it has not yet
   passed this fork's GPU runtime validation.
-- Indirect mesh dispatch is deliberately rejected rather than sending a
-  native mesh-dispatch command to a device without that capability.
+- Indirect mesh fallback is limited to one-dimensional records, 65,535
+  records per batch and a 32 MiB output region; excess work is zeroed.
 - Dynamic output-count equivalence is still unimplemented: the current path
   draws declared maxima and relies on zeroed unused primitive index records.
 - Synthetic output-content equivalence tests are still needed for output
-  packing, culling, wave64 and per-primitive output semantics.
+  packing, culling, wave64 and per-primitive output semantics. The converter
+  compile/layout tests are not rendering-equivalence tests.
 - The GTX 1050 Ti has 4 GB of VRAM. Even a correct fallback may be limited by
   temporary output buffers, the game's broader memory footprint, CPU shader
   translation costs and the 256 MiB per-allocation ceiling.
