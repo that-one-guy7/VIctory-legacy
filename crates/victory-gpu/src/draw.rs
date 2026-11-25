@@ -2529,7 +2529,7 @@ impl State {
         }
 
         // Rebind the fallback compute PSO after the converter's own PSO.
-        if !self.bind_as(list, p, &f.compute, &p.stages[..1], false, true) {
+        if !self.bind_as(list, p, &f.root, &f.compute, &p.stages[..1], false, true) {
             return false;
         }
         // SAFETY: converter wrote complete command records into this UAV.
