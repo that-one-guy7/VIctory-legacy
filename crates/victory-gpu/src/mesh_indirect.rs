@@ -351,6 +351,26 @@ mod tests {
     }
 
     #[test]
+    fn indirect_plan_carries_vertex_capacity_for_base_vertex_offsets() {
+        let layout = victory_shader::emit::MeshLayout {
+            threads: 32,
+            max_vertices: 64,
+            max_primitives: 32,
+            vertex_dwords: 8,
+            primitive_dwords: 0,
+        };
+        let regions = regions(&layout);
+        let plan = plan(2, 12, &layout, &regions, false, 0x1000, 80);
+        assert_eq!(plan[15], 64);
+    }
+
+    #[test]
+    fn converter_rejects_dispatch_counts_above_d3d12_limit() {
+        assert_eq!(MAX_GROUPS_PER_DISPATCH, 65_535);
+        assert!(SOURCE.contains("g > 65535u"));
+    }
+
+    #[test]
     fn command_strides_match_root_and_draw_arguments() {
         assert_eq!(COMPUTE_STRIDE, 40);
         assert_eq!(draw_stride(false), 32);
