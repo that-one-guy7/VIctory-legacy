@@ -99,6 +99,10 @@ The direct path now has the first GPU-side integration:
   capped at 256 MiB; allocation failure drops the draw instead of requesting
   an unbounded amount of VRAM.
 - Float signature outputs are bit-cast to dwords before raw UAV stores.
+- The current emitter draws the declared maximum output slots. It initializes
+  unused primitive index records to zero but does not yet preserve dynamic
+  per-dispatch output counts, so this can add work and still needs equivalence
+  testing on shaders that emit fewer than their declared maxima.
 
 This is **direct-dispatch support only**. Indirect mesh dispatch is explicitly
 rejected until its argument conversion, count handling and indirect command
@@ -132,6 +136,8 @@ test, so do not treat it as a playable GTX 1050 Ti build.
   passed this fork's GPU runtime validation.
 - Indirect mesh dispatch is deliberately rejected rather than sending a
   native mesh-dispatch command to a device without that capability.
+- Dynamic output-count equivalence is still unimplemented: the current path
+  draws declared maxima and relies on zeroed unused primitive index records.
 - Synthetic output-content equivalence tests are still needed for output
   packing, culling, wave64 and per-primitive output semantics.
 - The GTX 1050 Ti has 4 GB of VRAM. Even a correct fallback may be limited by
