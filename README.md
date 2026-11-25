@@ -77,8 +77,12 @@ Research has identified upstream compute/vertex fallback work in
 [draft port, PR #2203](https://github.com/Marvisak/VIctory/pull/2203).
 Those are useful technical references, not proof of a playable fallback.
 This repository is a separate source snapshot; the upstream patches cannot be
-safely copied wholesale. **The fallback is not implemented yet.** The census
-command is a diagnostic milestone only.
+safely copied wholesale. The experimental shader branch now adds a
+compute-emission API and generated vertex shader, but the GPU pipeline,
+scratch-buffer allocation, barriers and fallback draw path are not wired in.
+**The GTX 1050 Ti fallback is not ready to run.** See
+[docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the current
+implementation status and acceptance gates.
 
 ## License
 
