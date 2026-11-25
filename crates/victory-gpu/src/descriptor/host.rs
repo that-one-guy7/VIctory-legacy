@@ -1566,13 +1566,6 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
 ) -> Option<Kept> {
     let shadow = crate::shadow::find(address, len)?;
-    if buffer.StructureByteStride == 0
-        && buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 == 0
-        && !typed_store(desc.Format.0 as u32)
-    {
-        once!(format = desc.Format.0, "an unordered buffer view in a format the host cannot store");
-        return None;
-    }
     let offset = shadow.offset(address);
     // A structured view as a raw view of the same bytes (see `raw_window`).
     // SAFETY: a buffer view's union member.
@@ -1653,6 +1646,13 @@ fn buffer_uav(
     }
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { &mut desc.Anonymous.Buffer };
+    if buffer.StructureByteStride == 0
+        && buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 == 0
+        && !typed_store(desc.Format.0 as u32)
+    {
+        once!(format = desc.Format.0, "an unordered buffer view in a format the host cannot store");
+        return None;
+    }
     let element = if buffer.StructureByteStride > 0 {
         u64::from(buffer.StructureByteStride)
     } else if buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0 {
