@@ -89,6 +89,62 @@ impl Default for GraphicsState {
     }
 }
 
+
+/// Integer render-target formats: D3D12 does not permit blending into them.
+fn integer_format(f: DXGI_FORMAT) -> bool {
+    matches!(
+        f,
+        DXGI_FORMAT_R32G32B32A32_UINT
+            | DXGI_FORMAT_R32G32B32A32_SINT
+            | DXGI_FORMAT_R32G32B32_UINT
+            | DXGI_FORMAT_R32G32B32_SINT
+            | DXGI_FORMAT_R16G16B16A16_UINT
+            | DXGI_FORMAT_R16G16B16A16_SINT
+            | DXGI_FORMAT_R32G32_UINT
+            | DXGI_FORMAT_R32G32_SINT
+            | DXGI_FORMAT_R10G10B10A2_UINT
+            | DXGI_FORMAT_R8G8B8A8_UINT
+            | DXGI_FORMAT_R8G8B8A8_SINT
+            | DXGI_FORMAT_R16G16_UINT
+            | DXGI_FORMAT_R16G16_SINT
+            | DXGI_FORMAT_R32_UINT
+            | DXGI_FORMAT_R32_SINT
+            | DXGI_FORMAT_R8G8_UINT
+            | DXGI_FORMAT_R8G8_SINT
+            | DXGI_FORMAT_R16_UINT
+            | DXGI_FORMAT_R16_SINT
+            | DXGI_FORMAT_R8_UINT
+            | DXGI_FORMAT_R8_SINT
+    )
+}
+
+/// The title ignores blending on integer targets; D3D12 rejects it. When
+/// blending is independent, change only the affected targets. Otherwise make
+/// the states independent so non-integer targets retain the title's blend.
+fn host_blend(blend: &D3D12_BLEND_DESC, targets: &D3D12_RT_FORMAT_ARRAY) -> D3D12_BLEND_DESC {
+    let count = (targets.NumRenderTargets as usize).min(8);
+    let per_target = blend.IndependentBlendEnable.as_bool();
+    let blends = |i: usize| {
+        blend.RenderTarget[if per_target { i } else { 0 }]
+            .BlendEnable
+            .as_bool()
+    };
+    if !(0..count).any(|i| integer_format(targets.RTFormats[i]) && blends(i)) {
+        return *blend;
+    }
+    let mut host = *blend;
+    if !per_target {
+        host.IndependentBlendEnable = true.into();
+        host.RenderTarget = [blend.RenderTarget[0]; 8];
+    }
+    for i in 0..count {
+        if integer_format(targets.RTFormats[i]) {
+            host.RenderTarget[i].BlendEnable = false.into();
+        }
+    }
+    host
+}
+
 impl GraphicsState {
     /// Takes in one subobject of a stream: its type, then its data at +4
     /// (+8 for those holding pointers).
@@ -696,7 +752,7 @@ impl HostPipeline {
                 pRootSignature: unsafe { std::mem::transmute_copy(&root) },
                 VS: bytes(&f.vertex.dxil),
                 PS: code(1),
-                BlendState: g.blend,
+                BlendState: host_blend(&g.blend, &g.targets),
                 SampleMask: g.sample_mask,
                 RasterizerState: g.rasterizer,
                 DepthStencilState: g.depth,
@@ -837,7 +893,7 @@ impl HostPipeline {
                     BytecodeLength: gs.len(),
                 }
             }),
-            BlendState: g.blend,
+            BlendState: host_blend(&g.blend, &g.targets),
             SampleMask: g.sample_mask,
             RasterizerState: g.rasterizer,
             DepthStencilState: g.depth,
@@ -1161,4 +1217,62 @@ mod tests {
             "the mesh pipeline was compiled again instead of loaded from the library"
         );
     }
+
+    fn targets(formats: &[DXGI_FORMAT]) -> D3D12_RT_FORMAT_ARRAY {
+        let mut targets = D3D12_RT_FORMAT_ARRAY {
+            NumRenderTargets: formats.len() as u32,
+            ..Default::default()
+        };
+        targets.RTFormats[..formats.len()].copy_from_slice(formats);
+        targets
+    }
+
+    fn blending(independent: bool) -> D3D12_BLEND_DESC {
+        let mut blend = GraphicsState::default().blend;
+        blend.IndependentBlendEnable = independent.into();
+        for target in &mut blend.RenderTarget {
+            target.BlendEnable = true.into();
+            target.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            target.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        }
+        blend
+    }
+
+    #[test]
+    fn integer_render_targets_disable_blending_without_changing_other_targets() {
+        let targets = targets(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R8_UINT,
+        ]);
+        for independent in [false, true] {
+            let actual = host_blend(&blending(independent), &targets);
+            assert!(actual.IndependentBlendEnable.as_bool());
+            assert!(actual.RenderTarget[0].BlendEnable.as_bool());
+            assert!(actual.RenderTarget[1].BlendEnable.as_bool());
+            assert!(!actual.RenderTarget[2].BlendEnable.as_bool());
+            assert_eq!(actual.RenderTarget[2].SrcBlend, D3D12_BLEND_SRC_ALPHA);
+            assert_eq!(actual.RenderTarget[0].DestBlend, D3D12_BLEND_INV_SRC_ALPHA);
+        }
+    }
+
+    #[test]
+    fn blend_states_without_active_integer_blending_are_preserved() {
+        let blend = blending(false);
+        let targets = targets(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R11G11B10_FLOAT,
+        ]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut blend = blending(true);
+        blend.RenderTarget[1].BlendEnable = false.into();
+        let targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        targets.RTFormats[1] = DXGI_FORMAT_R8_UINT;
+        assert_eq!(host_blend(&blending(false), &targets), blending(false));
+    }
+
 }
