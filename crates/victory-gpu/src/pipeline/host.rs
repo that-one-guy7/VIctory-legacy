@@ -673,11 +673,11 @@ impl HostPipeline {
             };
             let cs = D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 // SAFETY: a borrowed pointer the description never releases.
-                pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                pRootSignature: unsafe { std::mem::transmute_copy(&compute_root) },
                 CS: bytes(&f.compute.dxil),
                 ..Default::default()
             };
-            let cs_name = super::library::name("mesh-fallback-cs", &root_blob, &[&f.compute.dxil], "");
+            let cs_name = super::library::name("mesh-fallback-cs", &compute_root_blob, &[&f.compute.dxil], "");
             let made = super::library::pipeline(
                 &cs_name,
                 |library, name| unsafe { library.LoadComputePipeline(name, &cs) },
@@ -738,6 +738,7 @@ impl HostPipeline {
                 } else {
                     match crate::mesh_indirect::signatures(
                         &host.device,
+                        &compute_root,
                         &root,
                         outputs,
                         inputs[0],
@@ -758,6 +759,7 @@ impl HostPipeline {
                 compute: false,
                 mesh: true,
                 fallback: Some(MeshFallback {
+                    root: compute_root,
                     compute: compute_pso,
                     layout: f.layout,
                     outputs,
