@@ -165,9 +165,13 @@ This behavior needs more coverage tests against real title shaders.
   passed on this repository's snapshot.
 - Some mesh shaders still require wave64 and are refused on 32-lane hosts.
 - The census is a diagnostic milestone, not compatibility support.
+- The fallback's root signatures use directly indexed descriptor heaps. This
+  requires Shader Model 6.6 and Resource Binding Tier 3; startup now queries
+  both and refuses the fallback with a specific log message when either is
+  unavailable. The GTX 1050 Ti's actual driver/runtime report must be checked.
 - The GTX 1050 Ti has 4 GB of VRAM; even a correct fallback may be limited by
-  temporary output buffers, the game's broader memory footprint, shader-model
-  features and CPU/GPU translation costs.
+  temporary output buffers, the game's broader memory footprint and CPU/GPU
+  translation costs.
 - Upstream synthetic-test results do not guarantee the target title will
   render correctly or perform acceptably on this machine.
 
