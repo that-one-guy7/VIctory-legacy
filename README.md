@@ -80,8 +80,9 @@ Completed milestones:
 **Important: the direct and indirect fallback paths are still experimental
 and have not been validated on a real non-mesh GPU.** Draft PR #6 adds an
 indirect argument-conversion pass and D3D12 compute/draw command signatures.
-It only accepts one-dimensional mesh dispatch records (`x,1,1`); records with
-y/z values other than 1 are zeroed. Each indirect batch is limited to 65,535
+The current direct-dispatch wrapper also handles only the x group count.
+The indirect converter accepts only one-dimensional records (`x,1,1`);
+records with y/z values other than 1 are zeroed. Each indirect batch is limited to 65,535
 records and a 32 MiB output region, with excess group work zeroed. Dynamic
 output counts are still approximated using declared maxima and unused
 primitive indices are initialized to zero. The lowerer adapts some wave64
