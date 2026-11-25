@@ -89,6 +89,7 @@ mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
 mod lower;
+mod mesh_vs;
 mod own_bits;
 mod rect;
 mod sampler;
@@ -113,8 +114,9 @@ pub use sampler::StaticSampler;
 pub use lower::set_host_max_wave;
 pub use rect::rect_list_gs;
 pub use shader::{
-    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
-    SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+    MEMORY_FAULTS, MEMORY_PAGES, MESH_COMPUTE_SPACES, MESH_OUT_SPACE, ROOT_CBV_SPACE, SAMPLER_SPACE,
+    SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES, SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_MEMORY_BASE,
+    USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     set_view_heap_limit,
 };
 
@@ -253,6 +255,52 @@ impl HostShader {
             .unwrap_or(0);
         n.next_multiple_of(4)
     }
+
+    /// Binding-space shift for the compute half of a mesh fallback.
+    /// The public stage remains Mesh; the emitted DXIL program kind is Compute.
+    pub fn space_shift(&self) -> u32 {
+        if self.stage != HwStage::Ms {
+            return 0;
+        }
+        let compute = || -> Option<bool> {
+            let c = Container::parse(&self.dxil).ok()?;
+            let word = c.part(FourCC::DXIL)?.data.get(0..4)?;
+            Some(u32::from_le_bytes(word.try_into().ok()?) >> 16 == 5)
+        };
+        if compute() == Some(true) { MESH_COMPUTE_SPACES } else { 0 }
+    }
+}
+
+/// Layout of the three raw buffers produced by the compute half of a mesh fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshLayout {
+    pub threads: u32,
+    pub max_vertices: u32,
+    pub max_primitives: u32,
+    pub vertex_dwords: u32,
+    pub primitive_dwords: u32,
+}
+
+impl MeshLayout {
+    /// Number of bytes required in vertex, index and per-primitive buffers.
+    pub fn bytes(&self, groups: u32) -> [u64; 3] {
+        let groups = u64::from(groups);
+        [
+            groups * u64::from(self.max_vertices) * u64::from(self.vertex_dwords) * 4,
+            groups * u64::from(self.max_primitives) * 12,
+            groups * u64::from(self.max_primitives) * u64::from(self.primitive_dwords) * 4,
+        ]
+    }
+}
+
+/// A mesh program lowered to a compute producer and generated vertex consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshFallback {
+    pub compute: HostShader,
+    pub vertex: HostShader,
+    /// Per-primitive outputs require an expanded, unindexed triangle draw.
+    pub expanded: bool,
+    pub layout: MeshLayout,
 }
 
 /// One dword of user data and the root parameter that fills it.
@@ -266,6 +314,83 @@ pub struct UserData {
     pub root: RootType,
     /// Dword within the parameter.
     pub dword: u32,
+}
+
+/// Translates a mesh program into a compute shader that writes raw output
+/// buffers, plus a vertex shader that consumes those buffers.
+pub fn translate_mesh_as_compute(container: &[u8]) -> Result<MeshFallback, ShaderError> {
+    let c = Container::parse(container)?;
+    let dxil = c
+        .part(FourCC::DXIL)
+        .ok_or(ShaderError::Malformed("no DXIL part"))?;
+    let native = crate::native_programs(dxil.data)?
+        .into_iter()
+        .find(|program| program.stage == HwStage::Ms)
+        .ok_or(ShaderError::Unsupported {
+            offset: 0,
+            what: "a container without a mesh program",
+        })?;
+    let p = crate::spill::build(&native)?;
+    let st = structure::structure(&p);
+    let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
+    let io = io::raise(&p, &native)?;
+    let st = st?;
+    emit_mesh_as_compute(&c, &native, &p, &st, &io, &res)
+}
+
+/// Emits the compute and vertex halves after earlier shader-analysis stages.
+pub fn emit_mesh_as_compute(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+) -> Result<MeshFallback, ShaderError> {
+    if native.stage != HwStage::Ms {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a non-mesh program requested as a mesh fallback",
+        });
+    }
+    lower::take_needs();
+    let (compute, _wave, outputs, prims) =
+        emit_program_mode(c, native, p, st, io, res, true)?;
+    let crate::native::StageIo::Ms(mesh) = &native.io else {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a mesh program with no mesh I/O description",
+        });
+    };
+    let layout = MeshLayout {
+        threads: mesh.threads,
+        max_vertices: mesh.max_vertices,
+        max_primitives: mesh.max_primitives,
+        vertex_dwords: 4 * outputs.len() as u32,
+        primitive_dwords: 4 * prims.len() as u32,
+    };
+    let vertex = HostShader {
+        stage: HwStage::Vs,
+        dxil: mesh_vs::vertex_shader(
+            &outputs,
+            &prims,
+            layout.vertex_dwords,
+            layout.primitive_dwords,
+        ),
+        user_data: Vec::new(),
+        samplers: Vec::new(),
+        static_samplers: Vec::new(),
+        root_cbvs: Vec::new(),
+        root_srvs: Vec::new(),
+        root_uavs: Vec::new(),
+        root_indexed_views: Vec::new(),
+    };
+    Ok(MeshFallback {
+        compute,
+        vertex,
+        expanded: !prims.is_empty(),
+        layout,
+    })
 }
 
 /// Translates the vertex, pixel, compute or mesh program of a console
@@ -568,6 +693,19 @@ fn emit_program(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<(HostShader, Option<u32>), ShaderError> {
+    emit_program_mode(c, native, p, st, io, res, false)
+        .map(|(shader, wave, _, _)| (shader, wave))
+}
+
+fn emit_program_mode(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    mesh_as_compute: bool,
+) -> Result<(HostShader, Option<u32>, Vec<container::SigElement>, Vec<container::SigElement>), ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
             Some(part) => signature(part.data),
@@ -632,9 +770,10 @@ fn emit_program(
         io,
         res,
         inputs,
-        outputs,
-        prims,
+        outputs: outputs.clone(),
+        prims: prims.clone(),
         mesh_stride,
+        mesh_as_compute,
     })?;
     let wave_size = l.wave_size;
     let shader = HostShader {
@@ -659,7 +798,7 @@ fn emit_program(
         root_uavs: l.root_uavs,
         root_indexed_views: res.root_indexed_views.clone(),
     };
-    Ok((shader, wave_size))
+    Ok((shader, wave_size, outputs, prims))
 }
 
 /// The rows of an `ISG1`/`OSG1` part.
@@ -1313,6 +1452,7 @@ mod tests {
             outputs: Vec::new(),
             prims: Vec::new(),
             mesh_stride: 0,
+        mesh_as_compute: false,
         })
         .unwrap();
         let mut dxil = l.dxil;
