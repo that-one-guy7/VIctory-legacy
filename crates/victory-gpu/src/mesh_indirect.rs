@@ -30,7 +30,7 @@ const SOURCE: &str = r#"
 cbuffer Plan : register(b0) {
     uint records; uint stride; uint counted; uint capacity;
     uint vertex_bytes; uint primitives; uint prim_bytes; uint expanded;
-    uint2 vertices; uint2 indices; uint2 prims; uint draws; uint unused;
+    uint2 vertices; uint2 indices; uint2 prims; uint draws; uint max_vertices;
 };
 RWByteAddressBuffer args : register(u0);
 RWByteAddressBuffer count : register(u1);
