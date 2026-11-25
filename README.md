@@ -82,8 +82,11 @@ Indirect dispatch counts above D3D12's 65,535-per-dimension limit are rejected.
 **The fallback is experimental and is not yet validated as playable on the
 GTX 1050 Ti.** The next acceptance gates are shader-output equivalence tests,
 DXIL/D3D12 validation, and a physical GPU run. Some wave64 programs may still
-be refused on 32-lane hardware. The GTX 1050 Ti's 4 GB VRAM may also constrain
-the temporary output buffers and the game's overall memory use.
+be refused on 32-lane hardware. The fallback also requires Shader Model 6.6
+and Resource Binding Tier 3 for the renderer's directly indexed descriptor
+heaps; startup now queries both capabilities and refuses the fallback if the
+adapter lacks either. The GTX 1050 Ti's 4 GB VRAM may also constrain temporary
+output buffers and the game's overall memory use.
 
 Run the read-only workload inventory with:
 
