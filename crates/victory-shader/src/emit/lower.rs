@@ -10463,13 +10463,6 @@ impl<'a> Lower<'a> {
                 let past = self.s.m.cmp(c, pred::IUGE, i, n);
                 culled = self.s.m.bin(c, Bin::Or, culled, past);
             }
-            if self.s.mesh_as_compute {
-                let group = self.mesh_group_id();
-                let max_vertices = self.s.mesh.expect("mesh").max_vertices;
-                let max_vertices = self.s.m.i32(max_vertices);
-                let first = self.s.m.bin(c, Bin::Mul, group, max_vertices);
-                i = self.s.m.bin(c, Bin::Add, i, first);
-            }
             *slot = i;
         }
         let mut values = Vec::with_capacity(3);
