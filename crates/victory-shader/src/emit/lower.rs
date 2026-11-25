@@ -10447,7 +10447,9 @@ impl<'a> Lower<'a> {
             }
             if self.s.mesh_as_compute {
                 let group = self.mesh_group_id();
-                let first = self.s.m.bin(c, Bin::Mul, group, self.s.m.i32(self.s.mesh.expect("mesh").max_vertices));
+                let max_vertices = self.s.mesh.expect("mesh").max_vertices;
+                let max_vertices = self.s.m.i32(max_vertices);
+                let first = self.s.m.bin(c, Bin::Mul, group, max_vertices);
                 i = self.s.m.bin(c, Bin::Add, i, first);
             }
             *slot = i;
