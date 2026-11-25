@@ -664,7 +664,9 @@ impl HostPipeline {
             return refuse("graphics state not kept (plain description)", shaders);
         };
         let state = g.describe();
-        if let (Some(f), Some((outputs, inputs))) = (fallback, fallback_params) {
+        if let (Some(f), Some((_, inputs))) = (fallback, fallback_params) {
+            let (compute_root, compute_root_blob, outputs) =
+                fallback_compute_root.expect("fallback compute root was built above");
             let bytes = |dxil: &[u8]| D3D12_SHADER_BYTECODE {
                 pShaderBytecode: dxil.as_ptr().cast(),
                 BytecodeLength: dxil.len(),
