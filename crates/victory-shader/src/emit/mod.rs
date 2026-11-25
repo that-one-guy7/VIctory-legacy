@@ -367,15 +367,24 @@ pub fn emit_mesh_as_compute(
             what: "a non-mesh program requested as a mesh fallback",
         });
     }
-    lower::take_needs();
-    let (compute, _wave, outputs, prims) =
-        emit_program_mode(c, native, p, st, io, res, true)?;
     let crate::native::StageIo::Ms(mesh) = &native.io else {
         return Err(ShaderError::Unsupported {
             offset: 0,
             what: "a mesh program with no mesh I/O description",
         });
     };
+    // The generated vertex/index path currently implements triangle lists
+    // only. Refuse strips, points and other topologies rather than drawing
+    // them with silently incorrect assembly.
+    if mesh.topology != 2 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a non-triangle mesh topology in the compute/vertex fallback",
+        });
+    }
+    lower::take_needs();
+    let (compute, _wave, outputs, prims) =
+        emit_program_mode(c, native, p, st, io, res, true)?;
     let layout = MeshLayout {
         threads: mesh.threads,
         max_vertices: mesh.max_vertices,
