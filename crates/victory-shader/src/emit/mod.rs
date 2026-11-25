@@ -1920,7 +1920,19 @@ mod mesh_fallback_tests {
             usage: 0xF,
             half: false,
         };
-        let dxil = mesh_vs::vertex_shader(&[position], &[], 4, 0, 64, 32);
+        let primitive = container::SigElement {
+            name: "TEXCOORD".into(),
+            index: 0,
+            kind: 0,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 1,
+            usage: 0x1,
+            half: false,
+        };
+        let dxil = mesh_vs::vertex_shader(&[position], &[primitive], 4, 4, 64, 32);
         let parsed = Container::parse(&dxil).expect("generated vertex shader container");
         assert!(parsed.part(FourCC::DXIL).is_some());
     }
