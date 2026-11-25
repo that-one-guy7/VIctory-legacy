@@ -175,6 +175,35 @@ This behavior needs more coverage tests against real title shaders.
 - Upstream synthetic-test results do not guarantee the target title will
   render correctly or perform acceptably on this machine.
 
+## Runtime fixes from the follow-up review
+
+The fallback now uses two root signatures rather than sharing one between
+compute and graphics:
+
+- The graphics signature exposes mesh-stage bindings to the generated vertex
+  shader only. Pixel-stage bindings retain pixel visibility.
+- The compute signature contains only the mesh-stage parameters and static
+  samplers, with ALL visibility, followed by the three output UAVs.
+- Indirect compute and draw command signatures are created against their
+  respective root signatures.
+
+This avoids the D3D12 root-signature visibility collision that can otherwise
+refuse fallback pipelines when both mesh and pixel shaders use overlapping
+registers. The generated vertex shader's output SRVs stay in the graphics
+signature; compute UAVs stay in the compute signature.
+
+The per-list data scratch pool now rewinds its allocation cursor before each
+sequential mesh fallback output allocation. This is safe only because each
+direct or indirect fallback path records the output read and transitions the
+buffer back to UAV before the next allocation can overwrite it. The pool keeps
+its bounded 64 MiB budget and uses 4 MiB growth chunks (larger individual
+allocations are still sized to fit).
+
+These changes address two known causes of real-device failure: invalid root
+signatures and scratch-buffer growth across thousands of mesh draws. They do
+not fix unrelated game memory use, untranslated shaders, wave64 emulation, or
+guarantee playable performance on the GTX 1050 Ti.
+
 ## Next acceptance gate
 
 Before enabling the fallback by default, require all of the following:
