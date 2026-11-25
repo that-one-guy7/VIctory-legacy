@@ -1812,12 +1812,124 @@ impl State {
         }
     }
 
+    /// Run a mesh program through a compute pass and draw its generated
+    /// triangle/index buffers with the fallback vertex shader.
+    fn dispatch_mesh_fallback(
+        &mut self,
+        list: &HostList,
+        p: &HostPipeline,
+        f: &crate::pipeline::host::MeshFallback,
+        groups: u32,
+    ) -> bool {
+        if groups == 0 {
+            return true;
+        }
+        let Some([vertices, indices, prims]) = f.layout.checked_bytes(groups) else {
+            once!(groups, "mesh fallback output size overflow");
+            return false;
+        };
+        let align = |n: u64| n.checked_add(255).map(|n| n & !255);
+        let (Some(at_indices), Some(at_prims)) = (align(vertices), align(vertices).and_then(|v| align(indices).and_then(|i| v.checked_add(i)))) else {
+            once!(groups, "mesh fallback output offsets overflow");
+            return false;
+        };
+        let Some(index_count) = f
+            .layout
+            .max_primitives
+            .checked_mul(groups)
+            .and_then(|n| n.checked_mul(3))
+        else {
+            once!(groups, "mesh fallback index count overflow");
+            return false;
+        };
+        let Ok(index_bytes) = u32::try_from(indices) else {
+            once!(groups, "mesh fallback index buffer exceeds 4 GiB");
+            return false;
+        };
+        let Some(bytes) = at_prims.checked_add(prims.max(16)) else {
+            return false;
+        };
+        let Some(region) = list.mesh_scratch(bytes, ScratchPool::Data) else {
+            once!(bytes, "mesh fallback scratch allocation failed");
+            return false;
+        };
+        let buffer = &region.buffer;
+        list.keep(buffer);
+        let l = &list.list;
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_INDEX_BUFFER;
+        if region.first {
+            // SAFETY: the chunk is live and has not been used by this list yet.
+            unsafe { l.ResourceBarrier(&[transition(buffer, D3D12_RESOURCE_STATE_COMMON, uav)]) };
+        }
+        if !self.bind_as(list, p, &f.compute, &p.stages[..1], false, true) {
+            return false;
+        }
+        // SAFETY: the scratch buffer remains alive until the list is reset.
+        let base = unsafe { buffer.GetGPUVirtualAddress() } + region.offset;
+        // SAFETY: an open list with the compute PSO and root signature bound.
+        unsafe {
+            for (param, at) in f.outputs.into_iter().zip([0, at_indices, at_prims]) {
+                l.SetComputeRootUnorderedAccessView(param, base + at);
+            }
+            #[cfg(feature = "diagnostics")]
+            list.note_op(|| self.op_text(format!("mesh {groups} as compute"), false));
+            l.Dispatch(groups, 1, 1);
+            l.ResourceBarrier(&[transition(buffer, uav, read)]);
+        }
+
+        let drawn = self.prepare_for(list, false, true);
+        if drawn {
+            // SAFETY: an open list with the fallback graphics PSO and live scratch regions.
+            unsafe {
+                for (param, at) in f.inputs.into_iter().zip([0, at_indices, at_prims]) {
+                    l.SetGraphicsRootShaderResourceView(param, base + at);
+                }
+                l.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(4)); // triangle list
+                #[cfg(feature = "diagnostics")]
+                list.note_op(|| self.op_text(format!("mesh {groups} drawn"), false));
+                if f.expanded {
+                    // The generated vertex shader fetches primitive indices itself.
+                    l.DrawInstanced(index_count, 1, 0, 0);
+                } else {
+                    l.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
+                        BufferLocation: base + at_indices,
+                        SizeInBytes: index_bytes,
+                        Format: DXGI_FORMAT_R32_UINT,
+                    }));
+                    l.DrawIndexedInstanced(index_count, 1, 0, 0, 0);
+                }
+            }
+            self.set_topology(list, self.topology);
+        }
+        // Return the region to UAV state for later mesh dispatches on this list.
+        // SAFETY: the preceding compute and graphics commands use this resource in order.
+        unsafe { l.ResourceBarrier(&[transition(buffer, read, uav)]) };
+        drawn
+    }
+
     /// Runs a mesh dispatch of `x` groups on the host (the title's mesh
     /// programs are one-dimensional).
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
+        if let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This)
+            && let Some(f) = &p.fallback
+        {
+            let ran = mesh_test() != 1
+                && mesh_kept(self.pipeline)
+                && self.dispatch_mesh_fallback(list, p, f, x);
+            if ran {
+                DRAWN.fetch_add(1, Ordering::Relaxed);
+            } else {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "diagnostics")]
+                dropped(self.pipeline);
+            }
+            return;
+        }
         let ran = mesh_test() != 1
             && mesh_kept(self.pipeline)
             && self.prepare_for(list, false, true)
