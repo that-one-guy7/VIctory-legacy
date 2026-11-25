@@ -1881,6 +1881,7 @@ impl State {
 
         let drawn = self.prepare_for(list, false, true);
         if drawn {
+            self.mesh_scissor(list, true);
             // SAFETY: an open list with the fallback graphics PSO and live scratch regions.
             unsafe {
                 for (param, at) in f.inputs.into_iter().zip([0, at_indices, at_prims]) {
@@ -1901,6 +1902,7 @@ impl State {
                     l.DrawIndexedInstanced(index_count, 1, 0, 0, 0);
                 }
             }
+            self.mesh_scissor(list, false);
             self.set_topology(list, self.topology);
         }
         // Return the region to UAV state for later mesh dispatches on this list.
@@ -2447,6 +2449,13 @@ impl State {
                 "pipeline mismatch (compute {}, mesh {}, topology {})",
                 p.compute, p.mesh, self.topology
             ));
+            return false;
+        }
+        // Indirect mesh conversion needs an argument-clamp compute pass and
+        // two ExecuteIndirect signatures. Until that path is wired, never
+        // feed a native mesh-dispatch signature to a fallback pipeline.
+        if kind == MESH && p.fallback.is_some() {
+            why("indirect mesh fallback is not implemented yet");
             return false;
         }
         let len = u64::from(stride) * u64::from(max.max(1));
