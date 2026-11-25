@@ -2891,7 +2891,7 @@ impl Host {
                     && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0
             };
             let tier3 = options_ok
-                && options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
+                && options.ResourceBindingTier.0 >= D3D12_RESOURCE_BINDING_TIER_3.0;
             let supported = model_ok && tier3;
             tracing::info!(
                 shader_model_66 = model_ok,
