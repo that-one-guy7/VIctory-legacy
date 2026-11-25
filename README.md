@@ -79,8 +79,10 @@ Completed milestones:
 
 **Important: the direct-dispatch path is still experimental and has not been
 validated on a real non-mesh GPU.** Indirect mesh dispatch is explicitly
-rejected for now; wave64 emulation, per-primitive output equivalence, VRAM
-pressure and actual title rendering still need validation. The direct path
+rejected for now; dynamic output counts are approximated using declared maxima
+and unused primitive indices are initialized to zero. Wave64 emulation,
+per-primitive output equivalence, VRAM pressure and actual title rendering
+still need validation. The direct path
 also caps a single scratch allocation at 256 MiB to avoid unbounded requests.
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the exact
 status, implementation sequence and acceptance criteria.
