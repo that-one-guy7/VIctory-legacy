@@ -394,7 +394,7 @@ impl HostPipeline {
             vec![(cs, D3D12_SHADER_VISIBILITY_ALL)]
         } else {
             let first = match (mesh, find("vertex")) {
-                (Some(ms), _) if fallback.is_some() => (ms, D3D12_SHADER_VISIBILITY_ALL),
+                (Some(ms), _) if fallback.is_some() => (ms, D3D12_SHADER_VISIBILITY_VERTEX),
                 (Some(ms), _) => (ms, D3D12_SHADER_VISIBILITY_MESH),
                 (None, Some(vs)) => (vs, D3D12_SHADER_VISIBILITY_VERTEX),
                 (None, None) => return refuse("no vertex or mesh shader", shaders),
@@ -550,18 +550,13 @@ impl HostPipeline {
         // The compute producer writes u0-u2; the generated vertex shader
         // reads the same buffers as t0-t2. Keep these in their own space.
         let fallback_params = fallback.as_ref().map(|_| {
+            // The graphics signature only needs the generated vertex
+            // shader's SRVs. The compute producer gets its own root signature
+            // below, so its UAVs cannot overlap pixel-stage bindings.
             let first = params.len() as u32;
-            let (uav, srv) = (D3D12_ROOT_PARAMETER_TYPE_UAV, D3D12_ROOT_PARAMETER_TYPE_SRV);
-            for (register, kind, visibility) in [
-                (0, uav, D3D12_SHADER_VISIBILITY_ALL),
-                (1, uav, D3D12_SHADER_VISIBILITY_ALL),
-                (2, uav, D3D12_SHADER_VISIBILITY_ALL),
-                (0, srv, D3D12_SHADER_VISIBILITY_VERTEX),
-                (1, srv, D3D12_SHADER_VISIBILITY_VERTEX),
-                (2, srv, D3D12_SHADER_VISIBILITY_VERTEX),
-            ] {
+            for register in 0..3 {
                 params.push(D3D12_ROOT_PARAMETER1 {
-                    ParameterType: kind,
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
                     Anonymous: D3D12_ROOT_PARAMETER1_0 {
                         Descriptor: D3D12_ROOT_DESCRIPTOR1 {
                             ShaderRegister: register,
@@ -569,11 +564,47 @@ impl HostPipeline {
                             Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
                         },
                     },
-                    ShaderVisibility: visibility,
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_VERTEX,
                 });
             }
-            ([first, first + 1, first + 2], [first + 3, first + 4, first + 5])
+            (
+                [mesh_param_count as u32, mesh_param_count as u32 + 1, mesh_param_count as u32 + 2],
+                [first, first + 1, first + 2],
+            )
         });
+        let fallback_compute_root = if fallback.is_some() {
+            let mut compute_params = params[..mesh_param_count].to_vec();
+            for param in &mut compute_params {
+                param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            }
+            let mut compute_samplers = samplers[..mesh_sampler_count].to_vec();
+            for sampler in &mut compute_samplers {
+                sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            }
+            let outputs = [mesh_param_count as u32, mesh_param_count as u32 + 1, mesh_param_count as u32 + 2];
+            for register in 0..3 {
+                compute_params.push(D3D12_ROOT_PARAMETER1 {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                    Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                        Descriptor: D3D12_ROOT_DESCRIPTOR1 {
+                            ShaderRegister: register,
+                            RegisterSpace: MESH_OUT_SPACE,
+                            Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
+                        },
+                    },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+                });
+            }
+            match root_signature(&host.device, &compute_params, &compute_samplers, true) {
+                Ok((root, blob)) => Some((root, blob, outputs)),
+                Err(e) => {
+                    tracing::warn!(error = %e, ?shaders, "mesh fallback compute root signature refused");
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let (root, root_blob) = match root_signature(&host.device, &params, &samplers, compute.is_some()) {
             Ok(root) => root,
             Err(e) => {
