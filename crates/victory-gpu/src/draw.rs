@@ -1899,7 +1899,7 @@ impl State {
                 } else {
                     command_list.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: base + at_indices,
-                        SizeInBytes: index_bytes,
+                        SizeInBytes: index_bytes.expect("validated above"),
                         Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
                     }));
                     command_list.DrawIndexedInstanced(draw_vertices, 1, 0, 0, 0);
@@ -2414,6 +2414,11 @@ impl State {
         let Some(convert) = crate::mesh_indirect::convert() else {
             return false;
         };
+        let index_bytes = u32::try_from(indirect.regions.index_bytes).ok();
+        if !f.expanded && index_bytes.is_none() {
+            once!("mesh fallback indirect index buffer exceeds 32-bit size");
+            return false;
+        }
         let draws = match records.checked_mul(crate::mesh_indirect::COMPUTE_STRIDE) {
             Some(draws) => draws,
             None => return false,
@@ -2526,12 +2531,6 @@ impl State {
 
         let drawn = self.prepare_for(list, false, true);
         if drawn {
-            let Ok(index_bytes) = u32::try_from(indirect.regions.index_bytes) else {
-                once!("mesh fallback indirect index buffer exceeds 32-bit size");
-                // Restore states below before returning.
-                let _ = index_bytes;
-                return false;
-            };
             self.mesh_scissor(list, true);
             // SAFETY: the graphics PSO is bound and the output regions are in
             // non-pixel shader read state.
