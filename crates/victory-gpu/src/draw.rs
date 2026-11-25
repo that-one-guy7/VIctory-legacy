@@ -2423,6 +2423,8 @@ impl State {
             release_bounded();
             return false;
         };
+        let command_list = &list.list;
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         let index_bytes = u32::try_from(indirect.regions.index_bytes).ok();
         if !f.expanded && index_bytes.is_none() {
             once!("mesh fallback indirect index buffer exceeds 32-bit size");
@@ -2431,7 +2433,10 @@ impl State {
         }
         let draws = match records.checked_mul(crate::mesh_indirect::COMPUTE_STRIDE) {
             Some(draws) => draws,
-            None => return false,
+            None => {
+                release_bounded();
+                return false;
+            },
         };
         let command_bytes = u64::from(draws)
             .checked_add(u64::from(records) * u64::from(crate::mesh_indirect::draw_stride(f.expanded)));
@@ -2471,7 +2476,6 @@ impl State {
         }
         list.keep(&indirect.signatures.compute);
         list.keep(&indirect.signatures.draw);
-        let command_list = &list.list;
         let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
             | D3D12_RESOURCE_STATE_INDEX_BUFFER;
         // The bounded argument scratch is INDIRECT_ARGUMENT after a fresh
@@ -2558,7 +2562,7 @@ impl State {
                 if !f.expanded {
                     command_list.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: data_base + indirect.regions.indices,
-                        SizeInBytes: index_bytes,
+                        SizeInBytes: index_bytes.expect("validated above"),
                         Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
                     }));
                 }
