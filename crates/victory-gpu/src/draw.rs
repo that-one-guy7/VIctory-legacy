@@ -851,6 +851,8 @@ impl State {
         self.bind_as(list, p, &p.root, &p.pso, &p.stages, compute, compute)
     }
 
+    // The D3D12 binding path keeps its explicit pipeline, root, stage and mode inputs together.
+    #[allow(clippy::too_many_arguments)]
     fn bind_as(
         &mut self,
         list: &HostList,
@@ -2395,6 +2397,8 @@ impl State {
 impl State {
     /// Converts a clamped mesh-indirect argument stream to compute and draw
     /// command streams, then executes both on the fallback pipeline.
+    // The D3D12 binding path keeps its explicit pipeline, root, stage and mode inputs together.
+    #[allow(clippy::too_many_arguments)]
     fn execute_mesh_indirect_fallback(
         &mut self,
         list: &HostList,
