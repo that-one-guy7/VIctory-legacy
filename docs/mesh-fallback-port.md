@@ -29,16 +29,14 @@ configuration, not compatibility on the user's Windows 10 IoT LTSC host; that
 still needs a local launch test.
 
 
-The current host pipeline path creates a D3D12 mesh pipeline for a translated
-Xbox mesh shader and records it with
-ID3D12GraphicsCommandList6::DispatchMesh. The host capability check requires
-both a non-zero mesh-shader tier and Shader Model 6.6. A GPU without mesh
-shaders is therefore refused at pipeline creation; skipping that check alone
-would not make its mesh draws work.
+On mesh-capable adapters, the native path uses a D3D12 mesh pipeline
+and `ID3D12GraphicsCommandList6::DispatchMesh`. On adapters without native
+mesh shaders, PR #7 instead selects the experimental compute/vertex fallback
+described below. The fallback is a real conversion, not a capability override.
 
 The NVIDIA GTX 1050 Ti is a Pascal GPU without D3D12 mesh-shader support. It
-cannot execute the current native mesh path. The intended workaround is a
-real conversion, not a capability override.
+cannot execute the native mesh path; it must use the translated compute
+producer and generated conventional vertex draw.
 
 ## Upstream research
 
@@ -273,3 +271,91 @@ geometry work from being submitted at all.
 These are correctness fixes, not proof of output equivalence. The next gate is
 DXIL validation and synthetic output tests, followed by D3D12 validation on a
 non-mesh GPU. The GTX 1050 Ti remains unverified on physical hardware.
+
+
+## Latest GTX 1050 Ti run (2026-11-25)
+
+The uploaded `ztrx(7).log` confirms that the Agility SDK startup blocker is
+past the first gate: the process maps its game images and logs
+`host D3D12 device ready`. The Windows system copy of `D3D12Core.dll` was
+also present. This does not mean the mesh fallback has succeeded.
+
+The log instead shows three separate problems:
+
+1. Host pipeline creation still fails for some mesh-compute, regular-compute,
+   and vertex/pixel pipeline combinations with `0x80070057`
+   (`E_INVALIDARG`). The release build did not have the D3D12 debug layer
+   enabled, so the log does not contain the validation message that identifies
+   which PSO field or DXIL construct was rejected.
+2. Repeated 32 MiB unordered-access buffer allocations fail with
+   `0x8007000E` (out of memory). This is consistent with heavy fallback
+   scratch-buffer pressure on a 4 GiB card; it should not be attributed solely
+   to texture allocation.
+3. The title was still told that its display mode was 3840x2160. Fitting the
+   game window to the desktop does not change the render mode reported to the
+   title. The device was eventually removed after command submission; the
+   log does not contain DRED breadcrumbs naming the exact offending command.
+
+The reported run predates commit `c9012f9`, which adds a host blend-state
+correction for integer render targets. The follow-up compile issue in that
+commit was fixed in `b920e67`; the current PR head passed Windows CI,
+including Clippy, the diagnostics build, workspace tests, Agility staging,
+Release build, export checks, and launcher parsing. That newer blend change
+has not yet been tested on the physical GTX 1050 Ti.
+
+### Focused diagnostic run
+
+Set the title's reported output mode before launching, so the log should say
+`display mode reported to the title width=1280 height=720`:
+
+~~~powershell
+$env:VICTORY_DISPLAY_MODE = "1280x720"
+$env:VICTORY_MESH_FALLBACK = "1"
+$env:VICTORY_D3D12_DEBUG = "1"
+
+cargo build --profile diag -p victory --features diagnostics
+
+.\\scripts\\play.ps1 -Exe ".\\target\\diag\\victory.exe" -Game "C:\\PATH\\TO\\YOUR\\GAME.exe"
+
+notepad "$env:TEMP\\ztrx.log"
+~~~
+
+The diagnostics build enables the D3D12 debug layer; when a pipeline is
+refused, the runtime drains its InfoQueue messages into the log. Keep the
+environment variables in the same PowerShell window used to build and launch.
+The launcher stages the pinned Agility runtime for the selected executable
+profile. Replace the game path with the full path to the title executable.
+The first diagnostic run may be substantially slower; stop it with Ctrl+C if
+it becomes unresponsive. Do not enable GPU-based validation on the first pass.
+
+A useful result must include the first D3D12 validation messages near the first
+`mesh fallback compute pipeline refused` or `host pipeline refused` line,
+the reported display mode, and the last frame/memory lines. If the run still
+reports `3840x2160`, the display-mode override did not reach the process and
+the resolution comparison is inconclusive.
+
+## Reference comparison: avatarmanz/VIctory-7900XTX
+
+The [VIctory-7900XTX repository](https://github.com/avatarmanz/VIctory-7900XTX)
+is useful as a reference for texture/resource lifetime, descriptor tracking,
+asynchronous upload ordering, indirect batching, and shader translation
+corrections. Its tested machine is a very different target: a Radeon RX 7900
+XTX with native D3D12 mesh-shader support, paired with a high-end CPU and
+substantially more memory. Its native mesh pipeline cannot be copied wholesale
+to the GTX 1050 Ti.
+
+One particularly relevant reference feature is
+`VICTORY_SHOW_AFTER=1`: it delays making a new texture descriptor visible
+until the submission carrying that texture's upload has completed, using a
+neutral texture in the meantime. The reference integrates this with descriptor
+slot flips, upload jobs, and draw-time descriptor mirroring across its much
+larger `descriptor/host.rs` and `draw.rs` implementations. This repository
+does not currently implement that feature; merely setting the environment
+variable here has no effect. It is a candidate for a later, carefully ported
+texture-correctness milestone, after the current PSO validation and scratch
+allocation failures are isolated.
+
+Do not port the reference's entire descriptor or indirect implementation as
+a single change. Its code is from a different source snapshot and assumes
+native mesh shaders on RDNA3. Compare individual resource-lifetime invariants
+and synthetic tests against this branch before adapting anything.
