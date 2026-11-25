@@ -2401,22 +2401,32 @@ impl State {
         records: u32,
         from_common: bool,
     ) -> bool {
+        let release_bounded = || {
+            if !from_common {
+                crate::indirect::done(list, bounded);
+            }
+        };
         let Some(indirect) = &f.indirect else {
+            release_bounded();
             return false;
         };
         if records == 0 {
+            release_bounded();
             return true;
         }
         if records > 65_535 {
             once!(records, "mesh fallback indirect record count exceeds safe batch limit");
+            release_bounded();
             return false;
         }
         let Some(convert) = crate::mesh_indirect::convert() else {
+            release_bounded();
             return false;
         };
         let index_bytes = u32::try_from(indirect.regions.index_bytes).ok();
         if !f.expanded && index_bytes.is_none() {
             once!("mesh fallback indirect index buffer exceeds 32-bit size");
+            release_bounded();
             return false;
         }
         let draws = match records.checked_mul(crate::mesh_indirect::COMPUTE_STRIDE) {
@@ -2426,22 +2436,14 @@ impl State {
         let command_bytes = u64::from(draws)
             .checked_add(u64::from(records) * u64::from(crate::mesh_indirect::draw_stride(f.expanded)));
         let Some(command_bytes) = command_bytes else {
+            release_bounded();
             return false;
         };
         let Some(data_region) = list.mesh_scratch(indirect.regions.bytes, ScratchPool::Data) else {
-            return false;
-        };
-        let Some(command_region) = list.mesh_scratch(command_bytes, ScratchPool::Commands) else {
+            release_bounded();
             return false;
         };
         let data = &data_region.buffer;
-        let commands = &command_region.buffer;
-        list.keep(&indirect.signatures.compute);
-        list.keep(&indirect.signatures.draw);
-        let command_list = &list.list;
-        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
-            | D3D12_RESOURCE_STATE_INDEX_BUFFER;
         if data_region.first {
             // SAFETY: open list and live default-heap scratch buffer.
             unsafe {
@@ -2452,6 +2454,11 @@ impl State {
                 )]);
             }
         }
+        let Some(command_region) = list.mesh_scratch(command_bytes, ScratchPool::Commands) else {
+            release_bounded();
+            return false;
+        };
+        let commands = &command_region.buffer;
         if command_region.first {
             // SAFETY: open list and live default-heap scratch buffer.
             unsafe {
@@ -2462,6 +2469,11 @@ impl State {
                 )]);
             }
         }
+        list.keep(&indirect.signatures.compute);
+        list.keep(&indirect.signatures.draw);
+        let command_list = &list.list;
+        let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_INDEX_BUFFER;
         // The bounded argument scratch is INDIRECT_ARGUMENT after a fresh
         // clamp, but COMMON when reused from a completed one-record window.
         // SAFETY: the clamp has finished and this list owns the scratch buffer.
