@@ -848,13 +848,14 @@ impl State {
     /// False if the draw or dispatch must not run: a root SRV it reads
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
-        self.bind_as(list, p, &p.pso, &p.stages, compute, compute)
+        self.bind_as(list, p, &p.root, &p.pso, &p.stages, compute, compute)
     }
 
     fn bind_as(
         &mut self,
         list: &HostList,
         p: &HostPipeline,
+        root_signature: &ID3D12RootSignature,
         pso: &ID3D12PipelineState,
         stages: &[crate::pipeline::host::Stage],
         roots: bool,
@@ -885,14 +886,14 @@ impl State {
             0
         };
         TESTED_DEPTH.set((tested, false));
-        let root = p.root.as_raw() as usize;
+        let root = root_signature.as_raw() as usize;
         if self.host_roots[usize::from(compute)] != root {
             // SAFETY: an open list and a live root signature.
             unsafe {
                 if compute {
-                    l.SetComputeRootSignature(&p.root);
+                    l.SetComputeRootSignature(root_signature);
                 } else {
-                    l.SetGraphicsRootSignature(&p.root);
+                    l.SetGraphicsRootSignature(root_signature);
                 }
             }
             self.host_roots[usize::from(compute)] = root;
@@ -906,7 +907,7 @@ impl State {
             list.used_pipeline(&p.name);
             // The title may release the pipeline before it submits the list.
             list.keep(pso);
-            list.keep(&p.root);
+            list.keep(root_signature);
         }
         for stage in stages {
             let t = stage.translated();
@@ -1870,7 +1871,7 @@ impl State {
             }
         }
         // The compute pass reads the title's graphics root arguments.
-        if !self.bind_as(list, p, &f.compute, &p.stages[..1], false, true) {
+        if !self.bind_as(list, p, &f.root, &f.compute, &p.stages[..1], false, true) {
             return false;
         }
         // SAFETY: the list holds this buffer through submission.
