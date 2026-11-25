@@ -1899,7 +1899,7 @@ impl State {
                 } else {
                     command_list.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: base + at_indices,
-                        SizeInBytes: index_bytes,
+                        SizeInBytes: index_bytes.expect("validated above"),
                         Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
                     }));
                     command_list.DrawIndexedInstanced(draw_vertices, 1, 0, 0, 0);
@@ -2388,6 +2388,212 @@ impl State {
 }
 
 impl State {
+    /// Converts a clamped mesh-indirect argument stream to compute and draw
+    /// command streams, then executes both on the fallback pipeline.
+    fn execute_mesh_indirect_fallback(
+        &mut self,
+        list: &HostList,
+        p: &HostPipeline,
+        f: &crate::pipeline::host::MeshFallback,
+        bounded: &ID3D12Resource,
+        args_offset: u64,
+        stride: u32,
+        records: u32,
+        from_common: bool,
+    ) -> bool {
+        let release_bounded = || {
+            if !from_common {
+                crate::indirect::done(list, bounded);
+            }
+        };
+        let Some(indirect) = &f.indirect else {
+            release_bounded();
+            return false;
+        };
+        if records == 0 {
+            release_bounded();
+            return true;
+        }
+        if records > 65_535 {
+            once!(records, "mesh fallback indirect record count exceeds safe batch limit");
+            release_bounded();
+            return false;
+        }
+        let Some(convert) = crate::mesh_indirect::convert() else {
+            release_bounded();
+            return false;
+        };
+        let command_list = &list.list;
+        let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        let index_bytes = u32::try_from(indirect.regions.index_bytes).ok();
+        if !f.expanded && index_bytes.is_none() {
+            once!("mesh fallback indirect index buffer exceeds 32-bit size");
+            release_bounded();
+            return false;
+        }
+        let draws = match records.checked_mul(crate::mesh_indirect::COMPUTE_STRIDE) {
+            Some(draws) => draws,
+            None => {
+                release_bounded();
+                return false;
+            },
+        };
+        let command_bytes = u64::from(draws)
+            .checked_add(u64::from(records) * u64::from(crate::mesh_indirect::draw_stride(f.expanded)));
+        let Some(command_bytes) = command_bytes else {
+            release_bounded();
+            return false;
+        };
+        let Some(data_region) = list.mesh_scratch(indirect.regions.bytes, ScratchPool::Data) else {
+            release_bounded();
+            return false;
+        };
+        let data = &data_region.buffer;
+        if data_region.first {
+            // SAFETY: open list and live default-heap scratch buffer.
+            unsafe {
+                command_list.ResourceBarrier(&[crate::host::transition(
+                    data,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    uav,
+                )]);
+            }
+        }
+        let Some(command_region) = list.mesh_scratch(command_bytes, ScratchPool::Commands) else {
+            release_bounded();
+            return false;
+        };
+        let commands = &command_region.buffer;
+        if command_region.first {
+            // SAFETY: open list and live default-heap scratch buffer.
+            unsafe {
+                command_list.ResourceBarrier(&[crate::host::transition(
+                    commands,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    uav,
+                )]);
+            }
+        }
+        list.keep(&indirect.signatures.compute);
+        list.keep(&indirect.signatures.draw);
+        let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_INDEX_BUFFER;
+        // The bounded argument scratch is INDIRECT_ARGUMENT after a fresh
+        // clamp, but COMMON when reused from a completed one-record window.
+        // SAFETY: the clamp has finished and this list owns the scratch buffer.
+        unsafe {
+            command_list.ResourceBarrier(&[crate::host::transition(
+                bounded,
+                if from_common {
+                    D3D12_RESOURCE_STATE_COMMON
+                } else {
+                    D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT
+                },
+                uav,
+            )]);
+        }
+        // SAFETY: addresses refer to the live regions retained by the list.
+        let data_base = unsafe { data.GetGPUVirtualAddress() } + data_region.offset;
+        let commands_base =
+            unsafe { commands.GetGPUVirtualAddress() } + command_region.offset;
+        let args = unsafe { bounded.GetGPUVirtualAddress() } + args_offset;
+        let plan = crate::mesh_indirect::plan(
+            records,
+            stride,
+            &f.layout,
+            &indirect.regions,
+            f.expanded,
+            data_base,
+            draws,
+        );
+        crate::mesh_indirect::record(
+            command_list,
+            convert,
+            &plan,
+            args,
+            commands_base,
+        );
+        // The converter is done reading the clamped argument stream.
+        // SAFETY: converter reads finished before this transition.
+        unsafe {
+            command_list.ResourceBarrier(&[crate::host::transition(
+                bounded,
+                uav,
+                D3D12_RESOURCE_STATE_COMMON,
+            )]);
+        }
+
+        // Rebind the fallback compute PSO after the converter's own PSO.
+        if !self.bind_as(list, p, &f.compute, &p.stages[..1], false, true) {
+            return false;
+        }
+        // SAFETY: converter wrote complete command records into this UAV.
+        unsafe {
+            command_list.ResourceBarrier(&[crate::host::transition(
+                commands,
+                uav,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+            command_list.ExecuteIndirect(
+                &indirect.signatures.compute,
+                records,
+                commands,
+                command_region.offset,
+                None,
+                0,
+            );
+            command_list.ResourceBarrier(&[crate::host::transition(data, uav, read)]);
+        }
+
+        let drawn = self.prepare_for(list, false, true);
+        if drawn {
+            self.mesh_scissor(list, true);
+            // SAFETY: the graphics PSO is bound and the output regions are in
+            // non-pixel shader read state.
+            unsafe {
+                command_list.SetGraphicsRootShaderResourceView(
+                    f.inputs[1],
+                    data_base + indirect.regions.indices,
+                );
+                command_list.SetGraphicsRootShaderResourceView(
+                    f.inputs[2],
+                    data_base + indirect.regions.prims,
+                );
+                if !f.expanded {
+                    command_list.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
+                        BufferLocation: data_base + indirect.regions.indices,
+                        SizeInBytes: index_bytes.expect("validated above"),
+                        Format: DXGI_FORMAT(42), // DXGI_FORMAT_R32_UINT
+                    }));
+                }
+                command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(4));
+                command_list.ExecuteIndirect(
+                    &indirect.signatures.draw,
+                    records,
+                    commands,
+                    command_region.offset + u64::from(draws),
+                    None,
+                    0,
+                );
+            }
+            self.mesh_scissor(list, false);
+            self.set_topology(list, self.topology);
+        }
+        // Keep both pools in UAV state for reuse by this command list.
+        // SAFETY: all indirect reads and graphics reads have been recorded.
+        unsafe {
+            command_list.ResourceBarrier(&[
+                crate::host::transition(data, read, uav),
+                crate::host::transition(
+                    commands,
+                    D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                    uav,
+                ),
+            ]);
+        }
+        drawn
+    }
+
     /// Indirect execution of a one-argument signature of `kind` (PC
     /// numbering: 0 draw, 1 indexed draw, 2 dispatch, 10 mesh dispatch) with
     /// records `stride` bytes apart at title address `arguments`, and the
@@ -2468,13 +2674,18 @@ impl State {
             },
             None => None,
         };
-        let Some(signature) = matches!(kind, DRAW | INDEXED | DISPATCH | MESH)
-            .then(|| host_signature(kind, stride))
-            .flatten()
-        else {
+        let mesh_fallback = kind == MESH && p.fallback.is_some();
+        let signature = if mesh_fallback {
+            None
+        } else {
+            matches!(kind, DRAW | INDEXED | DISPATCH | MESH)
+                .then(|| host_signature(kind, stride))
+                .flatten()
+        };
+        if !mesh_fallback && signature.is_none() {
             why("no host signature");
             return false;
-        };
+        }
         if kind == MESH && (mesh_test() == 1 || !mesh_kept(self.pipeline)) {
             why("mesh draws are switched off (VICTORY_MESH_TEST=skip)");
             return false;
@@ -2501,8 +2712,9 @@ impl State {
             .as_ref()
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
-            .map(|w| (w.scratch.clone(), offset - w.base));
-        let (bounded, at) = match hit {
+            .map(|w| (w.scratch.clone(), offset - w.base, w.step));
+        let from_common = hit.is_some();
+        let (bounded, at, bounded_stride) = match hit {
             Some(hit) => hit,
             None => {
                 // A record a short step after the last window's last one
@@ -2557,9 +2769,29 @@ impl State {
                     records,
                     scratch: bounded.clone(),
                 });
-                (bounded, 0)
+                (bounded, 0, step)
             }
         };
+        if mesh_fallback {
+            let records = if windowed { 1 } else { max };
+            let ran = self.execute_mesh_indirect_fallback(
+                list,
+                p,
+                p.fallback.as_ref().expect("mesh fallback selected above"),
+                &bounded,
+                at,
+                bounded_stride,
+                records,
+                from_common,
+            );
+            if ran {
+                DRAWN.fetch_add(1, Ordering::Relaxed);
+            } else {
+                why("mesh fallback indirect conversion or draw failed");
+            }
+            return ran;
+        }
+        let signature = signature.expect("non-fallback indirect path has a host signature");
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
