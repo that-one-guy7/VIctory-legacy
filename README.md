@@ -21,7 +21,7 @@ Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
 ## Requirements
 
 - Windows 10/11 x64, a CPU with AVX2
-- A Direct3D 12 GPU with shader model 6.6 and mesh shaders (NVIDIA RTX 20 series or newer)
+- A Direct3D 12 GPU with Shader Model 6.6 and mesh-shader support for the current renderer. GPUs without mesh shaders (including the GTX 1050 Ti) cannot run mesh pipelines until the compute/vertex fallback is completed.
 - Rust (the version in `rust-toolchain.toml`)
 - Several GB of free Windows commit memory (raise the paging file if `crashes.log` reports error 1455)
 
@@ -57,6 +57,28 @@ time on the test machines. Set them in PowerShell before running the script.
 | `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
 
 Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`
+
+## Mesh-shader fallback progress (2026-11-25)
+
+The current renderer still requires native D3D12 mesh shaders. The GTX 1050 Ti
+does not provide that feature, so it is not supported by the current mesh
+pipeline path. Disabling the capability check would only hide the failure; it
+would not turn mesh dispatches into ordinary draws.
+
+The first fallback-port milestone is a read-only workload inventory:
+- Run `cargo run --release -p victory -- mesh-census "<game folder>"` to
+  count mesh programs by group size, wave size, LDS use and declared output
+  limits. Add `--list` for per-program numeric metadata.
+- See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the
+  implementation sequence, upstream references and acceptance criteria.
+
+Research has identified upstream compute/vertex fallback work in
+[PR #961](https://github.com/Marvisak/VIctory/pull/961) and a newer
+[draft port, PR #2203](https://github.com/Marvisak/VIctory/pull/2203).
+Those are useful technical references, not proof of a playable fallback.
+This repository is a separate source snapshot; the upstream patches cannot be
+safely copied wholesale. **The fallback is not implemented yet.** The census
+command is a diagnostic milestone only.
 
 ## License
 
