@@ -2813,8 +2813,9 @@ fn hand_back(back: &[Declared]) {
 }
 
 impl Host {
-    /// Whether the host runs mesh shaders at shader model 6.6 (translated
-    /// mesh shaders need both); logged once.
+    /// Whether the host can run the native mesh path: mesh shaders,
+    /// Shader Model 6.6, and the directly indexed heaps used by all translated
+    /// shaders; logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {
         static MESH: OnceLock<bool> = OnceLock::new();
         *MESH.get_or_init(|| {
@@ -2842,7 +2843,8 @@ impl Host {
             };
             let mesh = ok
                 && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
-                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
+                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0
+                && self.bindless_heaps();
             tracing::info!(mesh, "host mesh shader support");
             mesh
         })
