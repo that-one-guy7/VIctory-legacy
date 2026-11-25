@@ -1304,16 +1304,12 @@ impl Drop for Scratch {
 /// until earlier GPU reads have completed.
 #[derive(Default)]
 struct MeshScratch {
-    pools: [Pool; 2],
+    pools: [Pool; 1],
 }
 
 /// Data and command buffers are separate because draws read data while
 /// indirect command conversion writes command records.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ScratchPool {
-    Data = 0,
-    Commands = 1,
-}
+undefined
 
 #[derive(Default)]
 struct Pool {
