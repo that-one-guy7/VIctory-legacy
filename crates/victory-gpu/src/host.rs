@@ -5648,41 +5648,6 @@ impl Host {
     }
 
 
-    /// A default-heap buffer that compute shaders may write, initially COMMON.
-    pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
-        let heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_DEFAULT,
-            ..Default::default()
-        };
-        let desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Width: size.max(1),
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            ..Default::default()
-        };
-        let mut buffer: Option<ID3D12Resource> = None;
-        // SAFETY: plain creation of a default-heap buffer.
-        if let Err(e) = unsafe {
-            self.device.CreateCommittedResource(
-                &heap,
-                D3D12_HEAP_FLAG_NONE,
-                &desc,
-                D3D12_RESOURCE_STATE_COMMON,
-                None,
-                &mut buffer,
-            )
-        } {
-            tracing::warn!(size, error = %e, "no mesh fallback UAV buffer");
-            return None;
-        }
-        buffer
-    }
-
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
