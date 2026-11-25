@@ -719,6 +719,8 @@ pub(crate) struct HostList {
     /// Upload memory for data the list's draws make (expanded vertices),
     /// reused after a reset.
     scratch: Mutex<Scratch>,
+    /// Default-heap UAV memory for mesh programs run as compute.
+    mesh_scratch: Mutex<MeshScratch>,
     /// Host texture states the list assumes, by host copy: at its start and
     /// at its end. Lists are recorded on many threads and run in submission
     /// order, so the transitions from a texture's real state are made at
@@ -1294,6 +1296,90 @@ unsafe impl Send for Scratch {}
 impl Drop for Scratch {
     fn drop(&mut self) {
         give_chunks(std::mem::take(&mut self.chunks));
+    }
+}
+
+
+/// Shader-writable default-heap chunks used by mesh fallback dispatches.
+/// Data and indirect command memory use separate pools because they have
+/// different resource-state transitions.
+#[derive(Default)]
+struct MeshScratch {
+    pools: [Pool; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ScratchPool {
+    Data = 0,
+    Commands = 1,
+}
+
+#[derive(Default)]
+struct Pool {
+    chunks: Vec<(ID3D12Resource, u64, u64, bool)>,
+    current: usize,
+}
+
+const MESH_CHUNK_FIRST: u64 = 1 << 20;
+const MESH_CHUNK: u64 = 64 << 20;
+const MESH_POOL_BUDGET: u64 = 64 << 20;
+
+pub(crate) struct ScratchRegion {
+    pub(crate) buffer: ID3D12Resource,
+    pub(crate) offset: u64,
+    pub(crate) first: bool,
+}
+
+impl Pool {
+    fn region(
+        &mut self,
+        len: u64,
+        make: impl FnOnce(u64) -> Option<ID3D12Resource>,
+    ) -> Option<ScratchRegion> {
+        let len = len.max(16).next_multiple_of(256);
+        let mut at = self.current;
+        while at < self.chunks.len() {
+            let (_, size, used, _) = &self.chunks[at];
+            if used.checked_add(len).is_some_and(|end| end <= *size) {
+                break;
+            }
+            at += 1;
+        }
+        if at == self.chunks.len() {
+            let doubled = MESH_CHUNK_FIRST.checked_shl(self.chunks.len().min(16) as u32)?;
+            let size = doubled.min(MESH_CHUNK).max(len.checked_next_power_of_two()?);
+            let held = self
+                .chunks
+                .iter()
+                .fold(0u64, |sum, chunk| sum.saturating_add(chunk.1));
+            let fits = self.chunks.iter().position(|c| len <= c.1);
+            if held.saturating_add(size) > MESH_POOL_BUDGET {
+                let first = fits?;
+                for (_, _, used, _) in &mut self.chunks {
+                    *used = 0;
+                }
+                at = first;
+            } else {
+                self.chunks.push((make(size)?, size, 0, false));
+            }
+        }
+        self.current = at;
+        let (buffer, _, used, touched) = &mut self.chunks[at];
+        let region = ScratchRegion {
+            buffer: buffer.clone(),
+            offset: *used,
+            first: !*touched,
+        };
+        *used = used.checked_add(len)?;
+        *touched = true;
+        Some(region)
+    }
+
+    fn reset(&mut self) {
+        for (_, _, used, touched) in &mut self.chunks {
+            (*used, *touched) = (0, false);
+        }
+        self.current = 0;
     }
 }
 
@@ -2762,6 +2848,20 @@ impl Host {
         })
     }
 
+
+    /// Whether mesh programs should use the compute/vertex fallback.
+    /// It is automatic on devices without native D3D12 mesh shaders; setting
+    /// VICTORY_MESH_FALLBACK=1 also forces it on capable devices for testing.
+    pub(crate) fn mesh_fallback(&self) -> bool {
+        static FALLBACK: OnceLock<bool> = OnceLock::new();
+        *FALLBACK.get_or_init(|| {
+            let forced = std::env::var("VICTORY_MESH_FALLBACK").is_ok_and(|v| v == "1");
+            let fallback = forced || !self.mesh_shaders();
+            tracing::info!(fallback, forced, "mesh programs run as compute");
+            fallback
+        })
+    }
+
     /// A new list, open for recording.
     pub(crate) fn new_list(&self) -> windows::core::Result<HostList> {
         #[cfg(feature = "diagnostics")]
@@ -2828,6 +2928,7 @@ impl Host {
                 list,
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
+                mesh_scratch: Mutex::default(),
                 states: Mutex::default(),
                 twins: Mutex::default(),
                 prelude,
@@ -4444,6 +4545,7 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner()).pools.iter_mut().for_each(Pool::reset);
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -4935,6 +5037,18 @@ impl HostList {
         name(&buffer, || format!("list upload {size:#x}"));
         self.deferred().hold_upload(buffer.clone(), size);
         Some((buffer, data))
+    }
+
+
+    /// A region of shader-writable memory, retained by this command list
+    /// until reset. Buffers stay in UAV state between regions.
+    pub(crate) fn mesh_scratch(&self, len: u64, pool: ScratchPool) -> Option<ScratchRegion> {
+        let mut scratch = self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner());
+        scratch.pools[pool as usize].region(len, |size| {
+            let buffer = host()?.uav_buffer(size)?;
+            name(&buffer, || format!("mesh fallback {pool:?} {size:#x}"));
+            Some(buffer)
+        })
     }
 
     /// `len` bytes of upload memory (256-byte aligned) until the list is
@@ -5535,6 +5649,7 @@ impl Host {
             }
         }
     }
+
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
