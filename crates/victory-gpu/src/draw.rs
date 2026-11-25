@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
 
-use crate::host::HostList;
+use crate::host::{transition, HostList, ScratchPool};
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
 
@@ -848,6 +848,22 @@ impl State {
     /// False if the draw or dispatch must not run: a root SRV it reads
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
+        self.bind_as(list, p, &p.pso, &p.stages, compute, compute)
+    }
+
+    /// Bind the given stages and pipeline, reading the title's graphics or
+    /// compute root arguments and setting them on the host's graphics or
+    /// compute root signature. A mesh fallback reads graphics arguments but
+    /// binds them to the compute pass.
+    fn bind_as(
+        &mut self,
+        list: &HostList,
+        p: &HostPipeline,
+        pso: &ID3D12PipelineState,
+        stages: &[crate::pipeline::host::Stage],
+        roots: bool,
+        compute: bool,
+    ) -> bool {
         let l = &list.list;
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them.
@@ -887,19 +903,19 @@ impl State {
         }
         // By host object: a title pipeline released and another made at its
         // address is another host pipeline (the list keeps the old one).
-        if self.host_pipeline != p.pso.as_raw() as usize {
+        if self.host_pipeline != pso.as_raw() as usize {
             // SAFETY: an open list and a live pipeline.
-            unsafe { l.SetPipelineState(&p.pso) };
-            self.host_pipeline = p.pso.as_raw() as usize;
+            unsafe { l.SetPipelineState(pso) };
+            self.host_pipeline = pso.as_raw() as usize;
             list.used_pipeline(&p.name);
             // The title may release the pipeline before it submits the list.
-            list.keep(&p.pso);
+            list.keep(pso);
             list.keep(&p.root);
         }
-        for stage in &p.stages {
+        for stage in stages {
             let t = stage.translated();
             STORES.set(t.stores);
-            let made = self.tables(list, &t.used, &t.host.root_indexed_views, compute);
+            let made = self.tables(list, &t.used, &t.host.root_indexed_views, roots);
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
@@ -911,7 +927,7 @@ impl State {
                 && !crate::pipeline::builder_quarantined(self.pipeline as This);
             // Title memory by address: what the shader finds it by.
             let memory = if t.host.root_srvs.contains(&victory_shader::emit::SLOT_MEMORY) {
-                let Some(ready) = self.memory_ready(list, compute, writes) else {
+                let Some(ready) = self.memory_ready(list, roots, writes) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
                     return false;
                 };
@@ -924,7 +940,7 @@ impl State {
                 for u in &t.host.user_data {
                     if let RootType::Other(kind) = u.root {
                         values[u.index as usize] =
-                            self.host_word(compute, kind, u.slot, u.dword, memory.as_ref());
+                            self.host_word(roots, kind, u.slot, u.dword, memory.as_ref());
                         continue;
                     }
                     let fresh = made
@@ -932,7 +948,7 @@ impl State {
                         .find(|m| m.0 == u.slot && u.root == RootType::Table);
                     values[u.index as usize] = match fresh {
                         Some(&(_, offset)) => offset,
-                        None => self.user_value(compute, u.slot, u.root, u.dword),
+                        None => self.user_value(roots, u.slot, u.root, u.dword),
                     };
                 }
                 // SAFETY: an open list; `values` covers the parameter.
@@ -979,7 +995,7 @@ impl State {
                         continue;
                     }
                     let tabled = srv && crate::pipeline::host::bounded_root_srvs();
-                    let Some(&Root::View(address)) = self.roots_ref(compute).get(usize::from(slot))
+                    let Some(&Root::View(address)) = self.roots_ref(roots).get(usize::from(slot))
                     else {
                         once!(slot, "a shader reads a root view the title did not set");
                         // A table left unset is undefined: a null view.
@@ -1005,7 +1021,7 @@ impl State {
                     };
                     if biased {
                         gpu -= u64::from(self.host_word(
-                            compute,
+                            roots,
                             victory_shader::emit::USER_VIEW_BIAS,
                             slot,
                             0,
@@ -1039,7 +1055,7 @@ impl State {
                     }
                     continue;
                 }
-                let address = match self.roots_ref(compute).get(usize::from(slot)) {
+                let address = match self.roots_ref(roots).get(usize::from(slot)) {
                     Some(&Root::View(address)) => Some(address),
                     _ => {
                         once!(slot, "a shader writes through a root view the title did not set");
