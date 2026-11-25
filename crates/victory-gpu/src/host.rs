@@ -2848,6 +2848,19 @@ impl Host {
         })
     }
 
+    /// Whether mesh pipelines should run through the compute/vertex fallback.
+    /// Defaults on automatically for GPUs without mesh shaders. Set
+    /// VICTORY_MESH_FALLBACK=1 to exercise it on supported hardware.
+    pub(crate) fn mesh_fallback(&self) -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let forced = std::env::var("VICTORY_MESH_FALLBACK").is_ok_and(|v| v == "1");
+            let fallback = forced || !self.mesh_shaders();
+            tracing::info!(fallback, forced, "mesh programs run through compute fallback");
+            fallback
+        })
+    }
+
     /// A new list, open for recording.
     pub(crate) fn new_list(&self) -> windows::core::Result<HostList> {
         #[cfg(feature = "diagnostics")]
