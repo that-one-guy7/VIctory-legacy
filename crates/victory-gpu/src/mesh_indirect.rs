@@ -308,6 +308,42 @@ mod tests {
     }
 
     #[test]
+    fn converter_hlsl_compiles_as_shader_model_5_1_compute() {
+        let mut code: Option<ID3DBlob> = None;
+        let mut errors: Option<ID3DBlob> = None;
+        // SAFETY: the source and entry-point strings live through compilation.
+        let result = unsafe {
+            D3DCompile(
+                SOURCE.as_ptr().cast(),
+                SOURCE.len(),
+                s!("mesh_indirect_test"),
+                None,
+                None,
+                s!("main"),
+                s!("cs_5_1"),
+                0,
+                0,
+                &mut code,
+                Some(&mut errors),
+            )
+        };
+        if let Err(error) = result {
+            let detail = errors.map(|blob| {
+                // SAFETY: the error blob owns the bytes for this read.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        blob.GetBufferPointer().cast::<u8>(),
+                        blob.GetBufferSize(),
+                    )
+                };
+                String::from_utf8_lossy(bytes).into_owned()
+            });
+            panic!("mesh indirect HLSL failed to compile: {error}; {detail:?}");
+        }
+        assert!(code.is_some(), "D3DCompile returned no bytecode");
+    }
+
+    #[test]
     fn command_strides_match_root_and_draw_arguments() {
         assert_eq!(COMPUTE_STRIDE, 40);
         assert_eq!(draw_stride(false), 32);
