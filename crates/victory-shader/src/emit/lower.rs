@@ -10364,9 +10364,24 @@ impl<'a> Lower<'a> {
             el.usage |= 1 << col;
             let comp = el.comp;
             if self.s.mesh_as_compute {
+                // Raw UAV stores are dword-based. Preserve the exact bits of
+                // floating-point signature values rather than passing f32
+                // values to rawBufferStore.i32.
+                let value = if comp == 9 {
+                    let float = if half.is_some() {
+                        self.as_float(x)
+                    } else if let Some(&float) = self.floats.get(&value) {
+                        float
+                    } else {
+                        self.as_float(x)
+                    };
+                    self.as_int(float)
+                } else {
+                    x
+                };
                 let out = if primitive { MESH_PRIMITIVES } else { MESH_VERTICES };
                 let slot = self.mesh_thread();
-                self.mesh_out_store_at(out, slot, id as u32 * 4 + u32::from(col), &[x]);
+                self.mesh_out_store_at(out, slot, id as u32 * 4 + u32::from(col), &[value]);
                 continue;
             }
             let (suffix, x) = match comp {
