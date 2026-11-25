@@ -104,7 +104,8 @@ pub(crate) fn vertex_shader(
         // later indirect record's StartVertexLocation.
         let per_group = s.m.i32(max_primitives * 3);
         let group = s.m.bin(e, Bin::UDiv, id, per_group);
-        let base = s.m.bin(e, Bin::Mul, group, s.m.i32(max_vertices));
+        let vertices_per_group = s.m.i32(max_vertices);
+        let base = s.m.bin(e, Bin::Mul, group, vertices_per_group);
         s.m.bin(e, Bin::Add, x, base)
     };
     let record = s.m.i32(vertex_dwords * 4);
