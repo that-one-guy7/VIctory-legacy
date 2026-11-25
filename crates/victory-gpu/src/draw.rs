@@ -2418,7 +2418,7 @@ impl State {
             release_bounded();
             return true;
         }
-        if records > 65_535 {
+        if records > crate::mesh_indirect::MAX_GROUPS_PER_DISPATCH {
             once!(records, "mesh fallback indirect record count exceeds safe batch limit");
             release_bounded();
             return false;
