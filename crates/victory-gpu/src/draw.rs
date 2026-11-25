@@ -901,14 +901,14 @@ impl State {
         // address is another host pipeline (the list keeps the old one).
         if self.host_pipeline != pso.as_raw() as usize {
             // SAFETY: an open list and a live pipeline.
-            unsafe { l.SetPipelineState(&pso) };
+            unsafe { l.SetPipelineState(pso) };
             self.host_pipeline = pso.as_raw() as usize;
             list.used_pipeline(&p.name);
             // The title may release the pipeline before it submits the list.
-            list.keep(&pso);
+            list.keep(pso);
             list.keep(&p.root);
         }
-        for stage in &stages {
+        for stage in stages {
             let t = stage.translated();
             STORES.set(t.stores);
             let made = self.tables(list, &t.used, &t.host.root_indexed_views, roots);
@@ -1920,7 +1920,7 @@ impl State {
         if let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This)
             && let Some(f) = &p.fallback
         {
-            if self.dispatch_mesh_fallback(list, p, f, x) {
+            if mesh_test() != 1 && mesh_kept(self.pipeline) && self.dispatch_mesh_fallback(list, p, f, x) {
                 DRAWN.fetch_add(1, Ordering::Relaxed);
             } else {
                 DROPPED.fetch_add(1, Ordering::Relaxed);
