@@ -100,13 +100,39 @@ there are no synthetic output-equivalence tests yet. This is not a playable
 build and should not be tested against the game until the PR is validated and
 merged.
 
+## Milestone 4: indirect dispatch conversion (draft PR #4)
+
+The indirect path now has a separate argument-conversion compute pass. The
+existing indirect clamp first bounds the title's argument records; the new
+pass reads those bounded records and writes two command streams:
+
+- compute commands: three output UAV addresses plus a `Dispatch`;
+- draw commands: the generated vertex-buffer SRV plus `Draw` or
+  `DrawIndexed`.
+
+The fallback then executes the compute command signature, transitions the
+output region for vertex/index reads, executes the draw command signature, and
+returns the scratch pools to UAV state. A separate per-list command scratch
+pool is used. The command-converter HLSL is compiled as Shader Model 5.1 and
+has a compile test plus layout/stride unit tests.
+
+**Current scope limits:**
+- Only one-dimensional mesh dispatch records (`x, 1, 1`) are accepted.
+  Records with y or z group counts other than 1 are converted to zero-work
+  commands rather than misindexed.
+- Each indirect batch is limited to 65,535 records and a 32 MiB output region.
+  The converter zeros records that would exceed the batch's group capacity.
+- This is still draft code: CI and physical-GPU validation are pending.
+  No output-equivalence or target-game rendering test has passed yet.
+
 ## Wave-size handling
 
 The existing shader lowerer uses the host's maximum wave size. It can map
-certain console wave64 patterns onto 32-lane host waves when cross-lane
-operations remain within a half-wave and LDS constraints permit it. Patterns
-that still require 64 lanes are refused by the mesh fallback rather than sent
-to a host that cannot execute them. More real-title coverage is still needed.
+certain console wave64 patterns onto 32-lane host waves when the cross-lane
+operations remain within a half-wave and the LDS constraints permit it.
+Patterns that still require 64 lanes remain unsupported and are refused by
+the mesh fallback rather than being sent to a host that cannot execute them.
+This behavior needs more coverage tests against real title shaders.
 
 ## Port sequence
 
@@ -121,9 +147,8 @@ to a host that cannot execute them. More real-title coverage is still needed.
 4. **Indirect dispatch:** translate console mesh-dispatch argument records
    into compute dispatch and draw arguments without losing count-buffer or
    ordering semantics.
-5. **Wave behavior:** verify console wave64 operations on 32-lane NVIDIA
-   execution groups. A mesh-to-compute conversion does not automatically
-   solve wave64 emulation.
+5. **Wave behavior:** expand tests for the existing wave64-to-wave32 lowering,
+   and confirm that unsupported 64-lane patterns are refused.
 6. **Validation:** add synthetic buffer/image equivalence tests, run DXIL
    validation and workspace Clippy/tests, then test on a non-mesh GPU. Report the
    exact adapter, driver, Agility runtime, VRAM/RAM, settings, frame captures
@@ -134,9 +159,11 @@ to a host that cannot execute them. More real-title coverage is still needed.
 
 - The direct-dispatch GPU path is present only in draft PR #3; CI and physical
   GPU validation are pending.
-- Indirect mesh dispatches are not yet converted on non-mesh GPUs.
-- The shader-emission path still needs synthetic output-content and D3D12
-  validation tests on this repository's snapshot.
+- Indirect fallback is limited to one-dimensional records, 65,535 records per
+  batch, and a 32 MiB output region; excess work is zeroed.
+- No synthetic output-content/image-equivalence or physical GPU test has
+  passed on this repository's snapshot.
+- Some mesh shaders still require wave64 and are refused on 32-lane hosts.
 - The census is a diagnostic milestone, not compatibility support.
 - The GTX 1050 Ti has 4 GB of VRAM; even a correct fallback may be limited by
   temporary output buffers, the game's broader memory footprint, shader-model
