@@ -292,6 +292,12 @@ pub(crate) struct MeshFallback {
     pub(crate) outputs: [u32; 3],
     pub(crate) inputs: [u32; 3],
     pub(crate) expanded: bool,
+    pub(crate) indirect: Option<MeshIndirect>,
+}
+
+pub(crate) struct MeshIndirect {
+    pub(crate) regions: crate::mesh_indirect::Regions,
+    pub(crate) signatures: crate::mesh_indirect::Signatures,
 }
 
 pub(crate) struct HostPipeline {
@@ -656,7 +662,36 @@ impl HostPipeline {
                     }
                 };
                 crate::host::name(&pso, || format!("{shaders:?} vertex fallback"));
-                tracing::info!(?shaders, "host mesh compute/vertex fallback pipeline");
+                let indirect = {
+                    let regions = crate::mesh_indirect::regions(&fallback_program.layout);
+                    if regions.bytes > crate::mesh_indirect::BYTES {
+                        tracing::warn!(
+                            bytes = regions.bytes,
+                            limit = crate::mesh_indirect::BYTES,
+                            "mesh fallback indirect output exceeds its fixed batch buffer"
+                        );
+                        None
+                    } else {
+                        match crate::mesh_indirect::signatures(
+                            &host.device,
+                            &root,
+                            outputs,
+                            inputs[0],
+                            fallback_program.expanded,
+                        ) {
+                            Ok(signatures) => Some(MeshIndirect { regions, signatures }),
+                            Err(error) => {
+                                tracing::warn!(error = %error, "mesh fallback indirect signatures unavailable");
+                                None
+                            }
+                        }
+                    }
+                };
+                tracing::info!(
+                    ?shaders,
+                    indirect = indirect.is_some(),
+                    "host mesh compute/vertex fallback pipeline"
+                );
                 return Some(HostPipeline {
                     compute: false,
                     mesh: true,
@@ -668,6 +703,7 @@ impl HostPipeline {
                         outputs,
                         inputs,
                         expanded: fallback_program.expanded,
+                        indirect,
                     }),
                     stages: bound,
                     name: format!("{shaders:?} mesh fallback"),

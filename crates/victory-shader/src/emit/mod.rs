@@ -383,8 +383,14 @@ pub fn emit_mesh_as_compute(
         });
     }
     lower::take_needs();
-    let (compute, _wave, outputs, prims) =
+    let (compute, wave, outputs, prims) =
         emit_program_mode(c, native, p, st, io, res, true)?;
+    if wave == Some(64) && lower::host_max_wave() < 64 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "mesh compute fallback still requires a 64-lane host wave",
+        });
+    }
     let layout = MeshLayout {
         threads: mesh.threads,
         max_vertices: mesh.max_vertices,
@@ -1935,5 +1941,44 @@ mod mesh_layout_tests {
             primitive_dwords: u32::MAX,
         };
         assert_eq!(layout.checked_bytes(u32::MAX), None);
+    }
+}
+
+#[cfg(test)]
+mod mesh_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn generated_mesh_vertex_shader_is_a_parseable_dxil_container() {
+        let position = container::SigElement {
+            name: "SV_Position".into(),
+            index: 0,
+            kind: 3,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage: 0xF,
+            half: false,
+        };
+        let dxil = mesh_vs::vertex_shader(&[position], &[], 4, 0);
+        let parsed = Container::parse(&dxil).expect("generated vertex shader container");
+        assert!(parsed.part(FourCC::DXIL).is_some());
+    }
+
+    #[test]
+    fn mesh_layout_sizes_are_aligned_by_each_output_region() {
+        let layout = MeshLayout {
+            threads: 32,
+            max_vertices: 64,
+            max_primitives: 32,
+            vertex_dwords: 8,
+            primitive_dwords: 4,
+        };
+        let [vertices, indices, primitives] = layout.bytes(2);
+        assert_eq!(vertices, 64 * 2 * 8 * 4);
+        assert_eq!(indices, 32 * 2 * 3 * 4);
+        assert_eq!(primitives, 32 * 2 * 4 * 4);
     }
 }
