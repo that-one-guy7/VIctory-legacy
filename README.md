@@ -92,3 +92,19 @@ acceptance gates.
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
+
+### Follow-up correctness work (2026-11-25)
+
+The fallback review found that mesh output indices are local to each dispatch
+group. A single conventional draw concatenates all groups, so those indices
+must be rebased. This branch now:
+- offsets indices for indexed direct dispatches by the group's vertex base;
+- derives the group base from `SV_VertexID` for expanded per-primitive draws,
+  including later indirect records;
+- adds the cumulative vertex base to indexed indirect draw arguments; and
+- rejects indirect compute dispatch records above D3D12's 65,535-group limit.
+
+These changes correct an output-addressing issue in the experimental fallback;
+they do **not** establish pixel-equivalent rendering or GTX 1050 Ti runtime
+support. Physical GPU validation and the device's shader-model/resource-binding
+capabilities remain acceptance gates.
