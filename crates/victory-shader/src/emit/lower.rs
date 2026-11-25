@@ -4104,12 +4104,8 @@ impl<'a> Lower<'a> {
             // one vertex buffer, so their indices need a per-group base.
             // Expanded draws instead recover the group base from SV_VertexID
             // in the generated vertex shader (also for indirect batches).
-            let vertex_base = self.s.m.bin(
-                c,
-                Bin::Mul,
-                g,
-                self.s.m.i32(mesh.max_vertices),
-            );
+            let vertices_per_group = self.s.m.i32(mesh.max_vertices);
+            let vertex_base = self.s.m.bin(c, Bin::Mul, g, vertices_per_group);
             vals.iter()
                 .map(|&value| self.s.m.bin(c, Bin::Add, value, vertex_base))
                 .collect::<Vec<_>>()
