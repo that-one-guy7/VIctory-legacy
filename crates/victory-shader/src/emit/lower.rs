@@ -4085,10 +4085,13 @@ impl<'a> Lower<'a> {
         };
         let c = self.cur;
         let g = self.mesh_group_id();
-        let first = self.s.m.bin(c, Bin::Mul, g, self.s.m.i32(per_group));
+        let per_group = self.s.m.i32(per_group);
+        let first = self.s.m.bin(c, Bin::Mul, g, per_group);
         let index = self.s.m.bin(c, Bin::Add, first, slot);
-        let base = self.s.m.bin(c, Bin::Mul, index, self.s.m.i32(record * 4));
-        let off = self.s.m.bin(c, Bin::Add, base, self.s.m.i32(dword * 4));
+        let record_bytes = self.s.m.i32(record * 4);
+        let base = self.s.m.bin(c, Bin::Mul, index, record_bytes);
+        let dword_bytes = self.s.m.i32(dword * 4);
+        let off = self.s.m.bin(c, Bin::Add, base, dword_bytes);
         let h = self.s.mesh_out_handle(out);
         let iu = self.s.m.undef(self.s.t.i32);
         let mut args = vec![h, off, iu];
