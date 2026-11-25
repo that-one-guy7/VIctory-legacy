@@ -366,8 +366,14 @@ pub fn emit_mesh_as_compute(
         });
     }
     lower::take_needs();
-    let (compute, _wave, outputs, prims) =
+    let (compute, wave, outputs, prims) =
         emit_program_mode(c, native, p, st, io, res, true)?;
+    if wave == Some(64) && lower::host_max_wave() < 64 {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "mesh compute fallback still requires a 64-lane host wave",
+        });
+    }
     let layout = MeshLayout {
         threads: mesh.threads,
         max_vertices: mesh.max_vertices,
