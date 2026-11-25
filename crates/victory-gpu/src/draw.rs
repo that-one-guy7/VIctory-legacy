@@ -1819,6 +1819,10 @@ impl State {
         if groups == 0 {
             return true;
         }
+        if groups > crate::mesh_indirect::MAX_GROUPS_PER_DISPATCH {
+            once!(groups, "mesh fallback dispatch exceeds D3D12's 65,535 group limit");
+            return false;
+        }
         let [vertices, indices, prims] = f.layout.bytes(groups);
         let align = |n: u64| n.checked_add(255).map(|v| v & !255);
         let Some(at_indices) = align(vertices) else {
