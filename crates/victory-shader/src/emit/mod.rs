@@ -282,14 +282,28 @@ pub struct MeshLayout {
 }
 
 impl MeshLayout {
-    /// Number of bytes required in vertex, index and per-primitive buffers.
-    pub fn bytes(&self, groups: u32) -> [u64; 3] {
+    /// Number of bytes required in vertex, index and per-primitive buffers,
+    /// returning None if any multiplication would overflow.
+    pub fn checked_bytes(&self, groups: u32) -> Option<[u64; 3]> {
         let groups = u64::from(groups);
-        [
-            groups * u64::from(self.max_vertices) * u64::from(self.vertex_dwords) * 4,
-            groups * u64::from(self.max_primitives) * 12,
-            groups * u64::from(self.max_primitives) * u64::from(self.primitive_dwords) * 4,
-        ]
+        let bytes = |count: u32, stride: u32| {
+            groups
+                .checked_mul(u64::from(count))?
+                .checked_mul(u64::from(stride))?
+                .checked_mul(4)
+        };
+        Some([
+            bytes(self.max_vertices, self.vertex_dwords)?,
+            bytes(self.max_primitives, 3)?,
+            bytes(self.max_primitives, self.primitive_dwords)?,
+        ])
+    }
+
+    /// Number of bytes required in vertex, index and per-primitive buffers.
+    /// Intended for known, validated workloads; use checked_bytes for
+    /// untrusted dispatch dimensions.
+    pub fn bytes(&self, groups: u32) -> [u64; 3] {
+        self.checked_bytes(groups).expect("mesh output size overflow")
     }
 }
 
