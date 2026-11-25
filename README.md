@@ -77,15 +77,19 @@ Completed milestones:
   shader support (or can be forced with `VICTORY_MESH_FALLBACK=1` on a
   supported GPU for testing).
 
-**Important: the direct-dispatch path is still experimental and has not been
-validated on a real non-mesh GPU.** Indirect mesh dispatch is explicitly
-rejected for now; dynamic output counts are approximated using declared maxima
-and unused primitive indices are initialized to zero. Wave64 emulation,
-per-primitive output equivalence, VRAM pressure and actual title rendering
-still need validation. The direct path
-also caps a single scratch allocation at 256 MiB to avoid unbounded requests.
-See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for the exact
-status, implementation sequence and acceptance criteria.
+**Important: the direct and indirect fallback paths are still experimental
+and have not been validated on a real non-mesh GPU.** Draft PR #6 adds an
+indirect argument-conversion pass and D3D12 compute/draw command signatures.
+It only accepts one-dimensional mesh dispatch records (`x,1,1`); records with
+y/z values other than 1 are zeroed. Each indirect batch is limited to 65,535
+records and a 32 MiB output region, with excess group work zeroed. Dynamic
+output counts are still approximated using declared maxima and unused
+primitive indices are initialized to zero. The lowerer adapts some wave64
+patterns to 32-lane hosts and refuses patterns that still require 64 lanes.
+Per-primitive output equivalence, VRAM pressure and actual title rendering
+still need validation. Direct scratch allocations are capped at 256 MiB.
+See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for exact status
+and acceptance criteria.
 
 Upstream references:
 - [Marvisak/VIctory PR #961](https://github.com/Marvisak/VIctory/pull/961)
