@@ -2849,15 +2849,60 @@ impl Host {
     }
 
 
+    /// Whether the root signature's directly indexed descriptor heaps are
+    /// supported. The translated shaders use ResourceDescriptorHeap and
+    /// SamplerDescriptorHeap, which require both Shader Model 6.6 and
+    /// Resource Binding Tier 3 (D3D12 dynamic resources).
+    pub(crate) fn bindless_heaps(&self) -> bool {
+        static SUPPORTED: OnceLock<bool> = OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+            let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
+                HighestShaderModel: D3D_SHADER_MODEL_6_6,
+            };
+            // SAFETY: each feature query writes its own correctly sized structure.
+            let options_ok = unsafe {
+                self.device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                ).is_ok()
+            };
+            // SAFETY: the shader-model query writes the requested model if supported.
+            let model_ok = unsafe {
+                self.device.CheckFeatureSupport(
+                    D3D12_FEATURE_SHADER_MODEL,
+                    (&raw mut model).cast(),
+                    size_of_val(&model) as u32,
+                ).is_ok()
+                    && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0
+            };
+            let tier3 = options_ok
+                && options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
+            let supported = model_ok && tier3;
+            tracing::info!(
+                shader_model_66 = model_ok,
+                resource_binding_tier_3 = tier3,
+                supported,
+                "host directly indexed descriptor heap support"
+            );
+            supported
+        })
+    }
+
     /// Whether mesh programs should use the compute/vertex fallback.
     /// It is automatic on devices without native D3D12 mesh shaders; setting
     /// VICTORY_MESH_FALLBACK=1 also forces it on capable devices for testing.
+    /// The fallback still needs the directly indexed heaps used by the
+    /// translated shaders.
     pub(crate) fn mesh_fallback(&self) -> bool {
         static FALLBACK: OnceLock<bool> = OnceLock::new();
         *FALLBACK.get_or_init(|| {
             let forced = std::env::var("VICTORY_MESH_FALLBACK").is_ok_and(|v| v == "1");
-            let fallback = forced || !self.mesh_shaders();
-            tracing::info!(fallback, forced, "mesh programs run as compute");
+            let requested = forced || !self.mesh_shaders();
+            let supported = self.bindless_heaps();
+            let fallback = requested && supported;
+            tracing::info!(fallback, forced, requested, bindless_heaps = supported, "mesh programs run as compute");
             fallback
         })
     }
