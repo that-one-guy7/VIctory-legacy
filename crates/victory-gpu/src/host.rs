@@ -1311,7 +1311,6 @@ struct MeshScratch {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ScratchPool {
     Data = 0,
-    #[allow(dead_code)] // Used by the stacked indirect-dispatch follow-up.
     Commands = 1,
 }
 
