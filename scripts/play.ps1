@@ -79,6 +79,13 @@ if (!(Test-Path -LiteralPath $CoreDll -PathType Leaf) -or
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
+
+# The experimental mesh fallback can create large intermediate buffers. Avoid
+# the default 4K render mode on low-VRAM adapters unless the user chose a mode.
+if ($env:VICTORY_MESH_FALLBACK -eq "1" -and [string]::IsNullOrWhiteSpace($env:VICTORY_DISPLAY_MODE)) {
+    $env:VICTORY_DISPLAY_MODE = "1280x720"
+    Write-Host "Mesh fallback: defaulting title display mode to 1280x720 (set VICTORY_DISPLAY_MODE to override)." -ForegroundColor Cyan
+}
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
