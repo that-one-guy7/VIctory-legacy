@@ -16,10 +16,11 @@ This change adds a small Windows memory-pressure controller with three jobs:
    is also deferred when either physical RAM or commit headroom is below
    512 MiB. If the Windows query is unavailable, the old allocation behavior
    is preserved.
-3. During sustained pressure, shorten the idle retention window for staging
-   buffers, title-memory shadow windows, and eligible title-filled texture
-   copies. Existing Arc/COM ownership checks remain mandatory: live command
-   lists, descriptors, and active texture users keep their resources alive.
+3. During sustained pressure, shorten the idle retention window to at most
+   2.5 seconds and 2 frames for staging buffers, title-memory shadow windows,
+   and eligible title-filled texture copies. Existing Arc/COM ownership checks
+   remain mandatory: live command lists, descriptors, and active texture users
+   keep their resources alive.
 
 The guard deliberately does **not** impose a 4 GiB global allocation cap, block
 required render targets, deny required mesh scratch or indirect buffers, migrate
