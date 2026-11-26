@@ -80,11 +80,25 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 
-# The experimental mesh fallback can create large intermediate buffers. Avoid
-# the default 4K render mode on low-VRAM adapters unless the user chose a mode.
-if ($env:VICTORY_MESH_FALLBACK -eq "1" -and [string]::IsNullOrWhiteSpace($env:VICTORY_DISPLAY_MODE)) {
-    $env:VICTORY_DISPLAY_MODE = "1280x720"
-    Write-Host "Mesh fallback: defaulting title display mode to 1280x720 (set VICTORY_DISPLAY_MODE to override)." -ForegroundColor Cyan
+# The experimental mesh fallback is memory- and CPU-intensive. Use a
+# conservative VRAM shadow budget, parallelize shadow work, and overlap GPU
+# submissions with copy-back. Explicit user values always take precedence.
+if ($env:VICTORY_MESH_FALLBACK -eq "1") {
+    $MeshFallbackDefaults = [ordered]@{
+        VICTORY_DISPLAY_MODE = "1280x720"
+        VICTORY_CARD_BUFFERS_MB = "256"
+        VICTORY_CARD_REHASH_RUNS = "1"
+        VICTORY_WIDE_BACK = "1"
+        VICTORY_WIDE_MERGE = "1"
+        VICTORY_RELAY = "1"
+        VICTORY_LATE_WAIT_LISTS = "16"
+    }
+    foreach ($Name in $MeshFallbackDefaults.Keys) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name, "Process"))) {
+            [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
+        }
+    }
+    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; parallel CPU copy/merge; async GPU submission; card-side buffer budget $env:VICTORY_CARD_BUFFERS_MB MB." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
