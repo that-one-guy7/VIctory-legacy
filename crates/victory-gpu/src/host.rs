@@ -584,6 +584,7 @@ fn create() -> windows::core::Result<Host> {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
             ..Default::default()
         })?;
+        name(&queue, || "VIctory host direct queue".to_string());
         let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
         let event = CreateEventW(None, false, false, None)?;
         let rtvs: ID3D12DescriptorHeap =
@@ -1251,14 +1252,24 @@ fn timing() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_TIMING").is_some())
 }
 
-/// Names a host object for the device-removed report, which names the
-/// allocations a page fault hit (only with device-removed data on).
+/// Names a host object for device-removed reports: allocations appear
+/// in page-fault data and command lists appear in DRED auto-breadcrumbs.
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
     if dred_on()
         && let Ok(object) = object.cast::<ID3D12Object>()
     {
         // SAFETY: a plain call on a live object.
         let _ = unsafe { object.SetName(&windows::core::HSTRING::from(text())) };
+    }
+}
+
+static NEXT_DRED_LIST_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn name_dred_list(list: &ID3D12GraphicsCommandList, kind: &str) {
+    if dred_on() {
+        let id = NEXT_DRED_LIST_ID.fetch_add(1, Ordering::Relaxed);
+        name(list, || format!("VIctory {kind} #{id}"));
     }
 }
 
@@ -3093,6 +3104,11 @@ impl Host {
         #[cfg(feature = "diagnostics")]
         let before = private_bytes();
         let list = self.make_list();
+        // DRED names survive even when its command-list pointer cannot be
+        // matched to the current batch's HostList references.
+        if let Ok(list) = &list {
+            name_dred_list(&list.list, "host command list");
+        }
         LISTS[0].fetch_add(1, Ordering::Relaxed);
         // (May shrink while a list is made, on another thread's account:
         // added as it is, the sum is what counts.)
@@ -3122,6 +3138,7 @@ impl Host {
                 let list: ID3D12GraphicsCommandList =
                     self.device
                         .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
+                name_dred_list(&list, "host prelude");
                 stage = "Close";
                 list.Close()?;
                 Ok((allocator, list))
@@ -4541,7 +4558,24 @@ impl Host {
                 let done = p.pLastBreadcrumbValue.as_ref().copied().unwrap_or(0);
                 let ours = p.pCommandList.as_ref().map(|l| l.as_raw());
                 let index = runs.iter().position(|r| Some(r.list.as_raw()) == ours);
-                progress.push(format!("{done}/{} {index:?}", p.BreadcrumbCount));
+                let list_name = if p.pCommandListDebugNameW.is_null() {
+                    "<unnamed>".to_string()
+                } else {
+                    p.pCommandListDebugNameW
+                        .to_string()
+                        .unwrap_or_else(|_| "<unreadable-name>".to_string())
+                };
+                let queue_name = if p.pCommandQueueDebugNameW.is_null() {
+                    "<unnamed>".to_string()
+                } else {
+                    p.pCommandQueueDebugNameW
+                        .to_string()
+                        .unwrap_or_else(|_| "<unreadable-name>".to_string())
+                };
+                progress.push(format!(
+                    "{done}/{} {index:?} list={list_name:?} queue={queue_name:?}",
+                    p.BreadcrumbCount
+                ));
                 node = p.pNext;
             }
             text.push_str(&format!("; breadcrumbs (done/count, list) {progress:?}"));
