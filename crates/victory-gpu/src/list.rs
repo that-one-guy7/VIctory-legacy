@@ -1375,7 +1375,6 @@ extern "system" fn clear_rtv(
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
         let host_rects = rects
-            .as_deref()
             .map(|rects| host_clear_rectangles(record.resource, rects));
         const RENDER_TARGET: u32 = 0x4;
         let rtv = host.rtv(Some(texture), record.desc().as_ref());
@@ -1425,7 +1424,6 @@ extern "system" fn clear_dsv(
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
         let host_rects = rects
-            .as_deref()
             .map(|rects| host_clear_rectangles(record.resource, rects));
         const DEPTH_WRITE: u32 = 0x10;
         // A depth texture shaders also write: what they wrote, first (the
