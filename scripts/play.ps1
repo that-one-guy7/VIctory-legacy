@@ -104,6 +104,25 @@ New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
 
-& $ExePath run $GamePath --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8
+# Record the *effective* process environment before starting the title. The
+# fallback profile intentionally preserves explicit values, so this makes
+# stale PowerShell overrides visible in the same log as runtime diagnostics.
+$RuntimeLog = Join-Path $env:TEMP "ztrx.log"
+@(
+    "VIctory launcher"
+    "executable=$ExePath"
+    "game=$GamePath"
+    "VICTORY_MESH_FALLBACK=$env:VICTORY_MESH_FALLBACK"
+    "VICTORY_DISPLAY_MODE=$env:VICTORY_DISPLAY_MODE"
+    "VICTORY_CARD_BUFFERS=$env:VICTORY_CARD_BUFFERS"
+    "VICTORY_CARD_BUFFERS_MIN_MB=$env:VICTORY_CARD_BUFFERS_MIN_MB"
+    "VICTORY_CARD_BUFFERS_MB=$env:VICTORY_CARD_BUFFERS_MB"
+    "VICTORY_CARD_WINDOWS_MB=$env:VICTORY_CARD_WINDOWS_MB"
+    "VICTORY_D3D12_DEBUG=$env:VICTORY_D3D12_DEBUG"
+    "VICTORY_D3D12_GBV=$env:VICTORY_D3D12_GBV"
+    "VICTORY_D3D12_DRED=$env:VICTORY_D3D12_DRED"
+) | Set-Content -LiteralPath $RuntimeLog -Encoding utf8
+
+& $ExePath run $GamePath --execute 2>&1 | Out-File $RuntimeLog -Append -Encoding utf8
 $ExitCode = $LASTEXITCODE
-Write-Host "Exited with $ExitCode; log: $env:TEMP\ztrx.log"
+Write-Host "Exited with $ExitCode; log: $RuntimeLog"
