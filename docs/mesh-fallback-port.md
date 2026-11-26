@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch; the latest PR revision passed Windows CI (Clippy, diagnostics build, and tests). Physical-GPU/image-equivalence validation remains outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45724895249](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45724895249) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing. Physical-GPU/image-equivalence validation remains outstanding.**
 
 ## Why this work is needed
 
@@ -268,9 +268,9 @@ selects the compute/vertex fallback when the active host pipeline requires it.
 Previously these calls were logged and dropped, which could prevent world
 geometry work from being submitted at all.
 
-These are correctness fixes, not proof of output equivalence. The next gate is
-DXIL validation and synthetic output tests, followed by D3D12 validation on a
-non-mesh GPU. The GTX 1050 Ti remains unverified on physical hardware.
+These are correctness fixes, not proof of output equivalence. The exact
+group-base duplication described above was removed and covered by a
+group-index unit test. The GTX 1050 Ti remains unverified on physical hardware.
 
 
 ## Latest GTX 1050 Ti run (2026-11-25)
@@ -280,28 +280,60 @@ past the first gate: the process maps its game images and logs
 `host D3D12 device ready`. The Windows system copy of `D3D12Core.dll` was
 also present. This does not mean the mesh fallback has succeeded.
 
-The log instead shows three separate problems:
+The log confirms that D3D12 device creation itself succeeded, but it
+still exposes several renderer problems:
 
-1. Host pipeline creation still fails for some mesh-compute, regular-compute,
-   and vertex/pixel pipeline combinations with `0x80070057`
-   (`E_INVALIDARG`). The release build did not have the D3D12 debug layer
-   enabled, so the log does not contain the validation message that identifies
-   which PSO field or DXIL construct was rejected.
-2. Repeated 32 MiB unordered-access buffer allocations fail with
-   `0x8007000E` (out of memory). This is consistent with heavy fallback
-   scratch-buffer pressure on a 4 GiB card; it should not be attributed solely
-   to texture allocation.
-3. The title was still told that its display mode was 3840x2160. Fitting the
-   game window to the desktop does not change the render mode reported to the
-   title. The device was eventually removed after command submission; the
-   log does not contain DRED breadcrumbs naming the exact offending command.
+1. The fallback compute PSO was refused 870 times with `0x80070057`
+   (`E_INVALIDARG`). Seven additional ordinary host pipeline creations were
+   refused. Because this was a Release run without the D3D12 debug layer, it
+   does not identify which DXIL or PSO input caused those errors.
+2. The renderer logged 96,197 failed unordered-access buffer allocations:
+   96,194 requested 32 MiB and three requested 1 MiB. Of these, 95,828
+   returned `0x8007000E` (out of memory) and 369 returned
+   `0x887A0005` (device suspended). The first repeated failures start at
+   approximately 23:35:30 UTC. This is a scratch-buffer allocation problem;
+   the log alone does not prove that all GPU memory was exhausted by this
+   fallback.
+3. The title was still told that its render mode was 3840x2160. Fitting the
+   window to the desktop does not reduce the render mode passed to the title.
+4. The device was eventually removed after submission of 25 command lists.
+   No DRED breadcrumbs identify the offending command.
 
-The reported run predates commit `c9012f9`, which adds a host blend-state
-correction for integer render targets. The follow-up compile issue in that
-commit was fixed in `b920e67`; the current PR head passed Windows CI,
-including Clippy, the diagnostics build, workspace tests, Agility staging,
-Release build, export checks, and launcher parsing. That newer blend change
-has not yet been tested on the physical GTX 1050 Ti.
+The reference repository has the same deliberately unimplemented console
+pipeline method at slot `0x218`; its `device.rs` comments say the description
+format is unknown and it refuses the call rather than returning a fake PSO.
+That warning is therefore not, by itself, evidence of a new regression in
+this branch.
+
+### Corrections made after this log
+
+Source review found a concrete mesh-index bug that matches the scattered
+triangle/particle-like rendering symptom. For non-expanded mesh draws, the
+lowerer added `groupId.x * max_vertices` once in `emit_indices` and again
+when `mesh_out_store_at` wrote the index buffer. This double-rebased every
+group after group zero, pointing indices past their intended vertex records.
+The extra addition in `emit_indices` is now removed; the shared store helper
+is the only rebasing point for indexed draws. Expanded draws retain local
+indices because the generated vertex shader applies the group base from
+`SV_VertexID`. A unit test covers both cases.
+
+The 32 MiB allocation-failure path also retried the same failed D3D12
+allocation on every mesh output request. The mesh scratch pool now remembers
+a refused allocation size until that command-list pool resets, and a unit test
+checks that it makes only one attempt per size before reset. This prevents the
+retry storm; it does **not** guarantee that a 32 MiB allocation will succeed
+on the GTX 1050 Ti.
+
+The reference repository's integer-render-target blend correction was also
+ported: graphics PSOs now disable blending only on integer render targets,
+preserving the blend settings on other targets. This handles a D3D12-invalid
+blend-state combination, but it does not by itself explain the separate
+mesh-compute PSO `E_INVALIDARG` errors.
+
+Finally, `scripts/play.ps1` now defaults to a reported `1280x720` mode when
+`VICTORY_MESH_FALLBACK=1` and no explicit `VICTORY_DISPLAY_MODE` is set.
+An explicit mode is preserved. The old log's 3840x2160 mode predates this
+launcher change.
 
 ### Focused diagnostic run
 
@@ -344,6 +376,11 @@ XTX with native D3D12 mesh-shader support, paired with a high-end CPU and
 substantially more memory. Its native mesh pipeline cannot be copied wholesale
 to the GTX 1050 Ti.
 
+The local branch also now uses the reference's integer-target blend-state
+rule in its two conventional graphics-PSO builders. That was a small
+self-contained correctness fix with unit coverage, unlike the reference's
+larger upload/descriptor lifecycle work.
+
 One particularly relevant reference feature is
 `VICTORY_SHOW_AFTER=1`: it delays making a new texture descriptor visible
 until the submission carrying that texture's upload has completed, using a
@@ -351,9 +388,10 @@ neutral texture in the meantime. The reference integrates this with descriptor
 slot flips, upload jobs, and draw-time descriptor mirroring across its much
 larger `descriptor/host.rs` and `draw.rs` implementations. This repository
 does not currently implement that feature; merely setting the environment
-variable here has no effect. It is a candidate for a later, carefully ported
-texture-correctness milestone, after the current PSO validation and scratch
-allocation failures are isolated.
+variable here has no effect. It remains a candidate for a later,
+carefully ported texture-correctness milestone, after the outstanding
+mesh-compute PSO validation and scratch-allocation behavior have been measured
+again.
 
 Do not port the reference's entire descriptor or indirect implementation as
 a single change. Its code is from a different source snapshot and assumes
