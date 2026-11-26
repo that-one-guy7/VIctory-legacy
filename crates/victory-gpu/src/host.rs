@@ -6364,24 +6364,10 @@ impl Host {
     }
 
     /// A device-local buffer shaders may write (unordered access) and indirect
-    /// execution may read, starting in the common state.
+    /// execution may read, starting in the common state. Required scratch and
+    /// indirect allocations use this path so optional memory policy cannot
+    /// silently disable core rendering work.
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
-        // Texture copies have their own budget gate, but mesh scratch, card
-        // shadows, twins and indirect buffers all arrive here. Keep this
-        // allocation path from consuming the adapter's last 15% of local
-        // memory. DXGI usage is process-wide and includes these resources;
-        // this is deliberately a headroom guard, not a global hard quota.
-        if let Some([budget, used, ..]) = self.video_memory()
-            && !local_uav_budget_allows(budget, used, size)
-        {
-            tracing::warn!(
-                budget_mb = budget / (1 << 20),
-                used_mb = used / (1 << 20),
-                request_mb = size.div_ceil(1 << 20),
-                "skipping device-local UAV buffer near the adapter memory budget"
-            );
-            return None;
-        }
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -6421,6 +6407,24 @@ impl Host {
                 None
             }
         }
+    }
+    
+    /// A best-effort device-local UAV allocation for optional optimizations.
+    /// Skip it when DXGI reports that the request would consume the final 15%
+    /// of local memory. The snapshot is advisory, not a global allocation cap.
+    pub(crate) fn optional_uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        if let Some([budget, used, ..]) = self.video_memory()
+            && !local_uav_budget_allows(budget, used, size)
+        {
+            tracing::warn!(
+                budget_mb = budget / (1 << 20),
+                used_mb = used / (1 << 20),
+                request_mb = size.div_ceil(1 << 20),
+                "skipping optional device-local UAV buffer near the adapter memory budget"
+            );
+            return None;
+        }
+        self.uav_buffer(size)
     }
 }
 
