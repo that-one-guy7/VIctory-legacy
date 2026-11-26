@@ -292,12 +292,23 @@ fn next() -> Arc<Pending> {
     }
 }
 
-/// Starts the workers (half the logical processors, 2 to 8) on first use.
+/// How many compilation workers to start. The game records work on its own
+/// threads, so default to two thirds of the logical processors (2..=8)
+/// rather than occupying only half while a cold pipeline cache is being built.
+/// `VICTORY_PIPELINE_WORKERS` allows a deliberate per-machine override.
+fn worker_count(logical: usize, requested: Option<usize>) -> usize {
+    requested.map_or_else(|| (logical.saturating_mul(2) / 3).clamp(2, 8), |n| n.clamp(1, 8))
+}
+
+/// Starts the workers (2/3 of logical processors, 2 to 8) on first use.
 fn workers() -> bool {
     static RUNNING: OnceLock<bool> = OnceLock::new();
     *RUNNING.get_or_init(|| {
         let logical = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let requested = (logical / 2).clamp(2, 8);
+        let configured = std::env::var("VICTORY_PIPELINE_WORKERS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        let requested = worker_count(logical, configured);
         let mut started = 0usize;
         for i in 0..requested {
             let spawned = std::thread::Builder::new()
@@ -354,6 +365,16 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_count_scales_for_pipeline_backlogs() {
+        assert_eq!(worker_count(8, None), 5);
+        assert_eq!(worker_count(4, None), 2);
+        assert_eq!(worker_count(16, None), 8);
+        assert_eq!(worker_count(8, Some(6)), 6);
+        assert_eq!(worker_count(8, Some(0)), 1);
+        assert_eq!(worker_count(8, Some(64)), 8);
+    }
 
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).
