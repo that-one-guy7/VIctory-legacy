@@ -2978,14 +2978,20 @@ impl Host {
 
     /// An allocator and a closed list for a prelude.
     fn make_prelude(&self) -> Option<Prelude> {
+        // Preserve the exact failing D3D12 operation in diagnostics. The
+        // combined error used to hide whether allocator creation, list
+        // creation, or closing the list failed under memory pressure.
+        let mut stage = "CreateCommandAllocator";
         // SAFETY: plain object creation.
         let made: windows::core::Result<Prelude> = unsafe {
             (|| {
                 let allocator: ID3D12CommandAllocator =
                     self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
+                stage = "CreateCommandList";
                 let list: ID3D12GraphicsCommandList =
                     self.device
                         .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
+                stage = "Close";
                 list.Close()?;
                 Ok((allocator, list))
             })()
@@ -2994,7 +3000,7 @@ impl Host {
         match made {
             Ok(prelude) => Some(prelude),
             Err(e) => {
-                tracing::warn!(error = %e, "no host list for a prelude");
+                tracing::warn!(stage, error = %e, "no host list for a prelude");
                 None
             }
         }
