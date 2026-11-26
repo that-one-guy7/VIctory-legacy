@@ -300,19 +300,29 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
 /// console, never earlier, and nothing can wait for itself that way (a
 /// part has no wait after its first work).
 #[cfg(windows)]
-fn remember_close_error(this: This, error: &windows::core::Error) -> HRESULT {
+fn record_close_error(
+    close_error: &std::sync::atomic::AtomicI32,
+    error: &windows::core::Error,
+) -> HRESULT {
     let code = error.code().0;
-    if !this.is_null() {
-        // SAFETY: the caller holds the live title list while recording it.
-        let list = unsafe { &*this.cast::<List>() };
-        let _ = list.close_error.compare_exchange(
-            S_OK,
-            code,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        );
-    }
+    let _ = close_error.compare_exchange(
+        S_OK,
+        code,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    );
     code
+}
+
+#[cfg(windows)]
+fn remember_close_error(this: This, error: &windows::core::Error) -> HRESULT {
+    if this.is_null() {
+        return error.code().0;
+    }
+    // SAFETY: this COM method receives a live title list and has no mutable
+    // Rust borrow of its fields.
+    let list = unsafe { &*this.cast::<List>() };
+    record_close_error(&list.close_error, error)
 }
 
 #[cfg(windows)]
@@ -339,7 +349,7 @@ fn cut(this: This, wait: ValueWait) {
         return;
     };
     if let Err(error) = current.close() {
-        remember_close_error(this, &error);
+        record_close_error(&list.close_error, &error);
     }
     static CUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if CUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
@@ -2225,7 +2235,7 @@ fn value_written(this: This, address: u64, value: u64) {
             return;
         };
         if let Err(error) = current.close() {
-            remember_close_error(this, &error);
+            record_close_error(&list.close_error, &error);
         }
         if let Some(done) = list.host.replace(fresh) {
             // The part so far keeps its waits; nothing stands before the
