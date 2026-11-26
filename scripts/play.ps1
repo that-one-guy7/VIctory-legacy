@@ -95,7 +95,7 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
         # This profile is intentionally aggressive for 4 GB-class adapters.
         # These only affect eligible host-side resources; the title's own
         # resource descriptions and required mesh/indirect allocations remain intact.
-        VICTORY_RENDER_SCALE = "0.5"
+        VICTORY_RENDER_SCALE = "1.0"
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
         VICTORY_TEXTURE_MIP_DROP = "2"
         VICTORY_TEXTURE_MIP_DROP_MIN_SIZE = "1024"
