@@ -1373,8 +1373,6 @@ extern "system" fn clear_rtv(
         });
         let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
         let rects = scaled_rects.as_deref().or(rects.as_deref());
-        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
-        let rects = scaled_rects.as_deref().or(rects.as_deref());
         const RENDER_TARGET: u32 = 0x4;
         let rtv = host.rtv(Some(texture), record.desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
@@ -1422,6 +1420,8 @@ extern "system" fn clear_dsv(
             // SAFETY: the title passes `count` rectangles, laid out as the host's.
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
+        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
+        let rects = scaled_rects.as_deref().or(rects.as_deref());
         const DEPTH_WRITE: u32 = 0x10;
         // A depth texture shaders also write: what they wrote, first (the
         // clear may be of one slice or of some rectangles).
