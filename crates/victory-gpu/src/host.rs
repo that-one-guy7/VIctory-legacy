@@ -6332,7 +6332,10 @@ impl Host {
                 let finished = FINISHED.load(Ordering::Acquire);
                 p.ahead.iter().position(|(_, flown)| *flown <= finished).or_else(|| {
                     let list = self.new_list().ok()?;
-                    list.close();
+                    if let Err(error) = list.close() {
+                        tracing::warn!(error = %error, "no closed list for a future present");
+                        return None;
+                    }
                     p.ahead.push((list, 0));
                     Some(p.ahead.len() - 1)
                 })
@@ -6370,7 +6373,10 @@ impl Host {
                     D3D12_RESOURCE_STATE_PRESENT,
                 ),
             ]);
-            copy.close();
+            if let Err(error) = copy.close() {
+                tracing::warn!(error = %error, "present copy list did not close");
+                return None;
+            }
             match slot {
                 Some(i) => {
                     let flown = self.execute_own(copy);
@@ -6421,7 +6427,7 @@ impl Host {
                 .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
                 .cast::<IDXGISwapChain3>()?;
             let copy = self.new_list()?;
-            copy.close();
+            copy.close()?;
             tracing::info!(width, height, format = format.0, "presenting to a window");
             Ok(Presenter {
                 swap_chain,
