@@ -6729,7 +6729,7 @@ mod local_uav_budget {
     #[test]
     fn leaves_fifteen_percent_for_driver_and_other_allocations() {
         let budget = 4 * (1 << 30);
-        let limit = budget / 100 * 85;
+        let limit = (budget / 100) * 85 + (budget % 100) * 85 / 100;
         assert!(local_uav_budget_allows(budget, limit - (64 << 20), 64 << 20));
         assert!(!local_uav_budget_allows(budget, limit, 1));
         assert!(!local_uav_budget_allows(budget, limit - (64 << 20), (64 << 20) + 1));
