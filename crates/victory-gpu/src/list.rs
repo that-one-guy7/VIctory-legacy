@@ -1051,8 +1051,7 @@ extern "system" fn copy_texture_region(
         if dst.kind!=FOOTPRINT&&let Some(copy)=dst_copy.as_ref(){
             let Some(mapped)=copy.host_subresource(dst.footprint.offset as u32)else{return;};
             to_location.footprint.offset=u64::from(mapped);
-            if copy.mip_drop>0{crate::texture::host_written_subresource(dst.resource,mapped);}
-            else{crate::texture::host_written(dst.resource);}
+            crate::texture::host_written_subresource(dst.resource,mapped);
         }
         if let Some(copy)=src_copy.as_ref(){
             let Some(mapped)=copy.host_subresource(src.footprint.offset as u32)else{return;};
@@ -1212,8 +1211,7 @@ extern "system" fn resolve(
         let (Some(dst_sub),Some(src_sub))=(dst_copy.host_subresource(dst_sub),src_copy.host_subresource(src_sub))else{return;};
         list.twin_use(dst,false,true);list.twin_use(src,false,false);
         ensure_state(list,dst,RESOLVE_DEST);ensure_state(list,src,RESOLVE_SOURCE);
-        if dst_copy.mip_drop>0{crate::texture::host_written_subresource(dst,dst_sub);}
-        else{crate::texture::host_written(dst);}
+        crate::texture::host_written_subresource(dst,dst_sub);
         #[cfg(feature = "diagnostics")]
         list.note_op(|| format!("resolve {src:?} to {dst:?} format {format}"));
         // SAFETY: an open list and live textures; the region is inside both.
