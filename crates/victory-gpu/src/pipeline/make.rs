@@ -491,9 +491,9 @@ mod tests {
         assert_eq!(queue.push(&promoted, REQUESTED), None);
 
         assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &requested));
-        assert!(Arc::ptr_eq(&queue.pop().unwrap(), &promoted));
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &promoted));
         assert_eq!(queue.push(&promoted, REQUESTED), None);
-        assert!(Arc::ptr_eq(&queue.pop().unwrap(), &earlier));
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &earlier));
         assert!(queue.pop(1).is_none());
     }
 }
