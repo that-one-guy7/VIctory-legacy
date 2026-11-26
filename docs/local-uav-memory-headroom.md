@@ -80,5 +80,5 @@ scratch fallback can reduce performance. Explicit process environment values
 still take precedence over these launcher defaults.
 
 For a clean test after earlier manual experiments, remove stale overrides for
-the four settings above before starting the launcher. The diagnostic header
+these profile settings before starting the launcher. The diagnostic header
 records the effective values so a log can confirm which profile actually ran.
