@@ -296,9 +296,10 @@ fn next() -> Arc<Pending> {
 fn workers() -> bool {
     static RUNNING: OnceLock<bool> = OnceLock::new();
     *RUNNING.get_or_init(|| {
-        let mut running = false;
-        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
-        for i in 0..workers {
+        let logical = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let requested = (logical / 2).clamp(2, 8);
+        let mut started = 0usize;
+        for i in 0..requested {
             let spawned = std::thread::Builder::new()
                 .name(format!("victory-pipelines-{i}"))
                 .spawn(|| {
@@ -318,12 +319,17 @@ fn workers() -> bool {
                     }
                 });
             if let Err(e) = spawned {
-                tracing::warn!(error = %e, "no pipeline worker");
+                tracing::warn!(worker = i, error = %e, "no pipeline worker");
             } else {
-                running = true;
+                started += 1;
             }
         }
-        running
+        tracing::info!(
+            logical_processors = logical,
+            workers = started,
+            "pipeline compilation workers ready"
+        );
+        started != 0
     })
 }
 

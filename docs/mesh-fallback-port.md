@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45724895249](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45724895249) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing. Physical-GPU/image-equivalence validation remains outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45727502203](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45727502203) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `d213703`. Physical-GPU/image-equivalence validation remains outstanding.**
 
 ## Why this work is needed
 
@@ -341,8 +341,8 @@ Set the title's reported output mode before launching, so the log should say
 `display mode reported to the title width=1280 height=720`:
 
 ~~~powershell
-$env:VICTORY_DISPLAY_MODE = "1280x720"
 $env:VICTORY_MESH_FALLBACK = "1"
+Remove-Item Env:VICTORY_DISPLAY_MODE -ErrorAction SilentlyContinue
 $env:VICTORY_D3D12_DEBUG = "1"
 
 cargo build --profile diag -p victory --features diagnostics
@@ -365,6 +365,73 @@ A useful result must include the first D3D12 validation messages near the first
 the reported display mode, and the last frame/memory lines. If the run still
 reports `3840x2160`, the display-mode override did not reach the process and
 the resolution comparison is inconclusive.
+
+## Latest GTX 1050 Ti run (2026-11-26; `ztrx(8).log`)
+
+The new log confirms that the launcher **did** report `1280x720` to the title.
+The separate lifecycle line saying the 3840x2160 window was fitted to the desktop
+describes the screen/window fit; it does not override the title's 1280x720 render
+mode. The resolution override is therefore no longer the blocker.
+
+The renderer still has substantial correctness failures:
+
+- The log contains 181 mesh shaders translated to compute, but **238 mesh
+  fallback compute-pipeline creation refusals** with `0x80070057`
+  (`E_INVALIDARG`). It also reports 14 ordinary host-pipeline refusals.
+  These PSO failures are a direct reason mesh draws are unavailable. This
+  Release log did not enable the D3D12 debug layer, so it does not contain the
+  InfoQueue explanation for the rejected compute PSOs.
+- The host view heap reaches its one-million-descriptor cap while the title
+  asks for index 1,245,184. Descriptors beyond the cap resolve as null. This
+  can remove textures/views from draws. The reference repository has the same
+  one-million cap; raising it blindly is unsafe on this NVIDIA path.
+- The log reports 310 `0x8007000E` out-of-memory failures, 147 missing-host-
+  texture events, 13 upload-buffer allocation failures, and eight
+  `0x887A0005` device-suspended errors. It also records an unordered placed
+  texture view of dimension 3 that the current host descriptor mirror cannot
+  represent; writes through that view are lost.
+- At a 0.5 fps frame, frame time reached 2,038 ms. Another slow frame reached
+  about 2,005 ms, with 867.9 ms of GPU work and 319.5 ms of copy-back. Other
+  slow frames show heavy CPU preparation and many draws dropped because their
+  host pipelines were unavailable. The device was eventually suspended during
+  texture/resource work; no DRED breadcrumbs identify the exact GPU command.
+
+These findings match the user's report of only a few visible models and a black
+3D cutscene better than a simple resolution problem: many mesh compute PSOs are
+rejected, descriptor indices past the cap are null, texture/resource allocation
+is failing, and one class of placed 3D UAV view is not mirrored. The log does
+not prove which single failure causes each missing model or the black cutscene.
+The reference `VIctory-7900XTX` repository also leaves placed unordered texture
+views unmirrored, so copying that code does not solve this gap.
+
+### CPU/GPU scheduling update
+
+The fallback launcher profile now:
+- keeps the title at 1280x720 unless the user explicitly chooses another mode;
+- caps card-side title-buffer shadows at 256 MiB by default to leave more room
+  for textures and render resources;
+- batches repeated GPU hash work with `VICTORY_CARD_REHASH_RUNS=1`;
+- enables parallel CPU snapshots, merges, and host-copy refreshes with
+  `VICTORY_WIDE_BACK=1`, `VICTORY_WIDE_MERGE=1`, and
+  `VICTORY_WIDE_REFRESH=1`, while preserving explicit user overrides.
+
+On the i7-6700, Windows normally reports eight logical processors. The copy
+pool is sized for three persistent workers plus the submitting thread
+(approximately four physical cores). Pipeline compilation already uses up to
+half the reported logical processors; the runtime now logs the number actually
+started. These settings let independent work use the available cores; they do
+not force the GPU to 100% utilization or guarantee a frame rate. Asynchronous
+queue relay remains opt-in until rendering and ordering are proven correct.
+
+### Next required hardware diagnostic
+
+The next run must use the diagnostics executable. The D3D12 debug layer is
+required to explain the 238 mesh fallback PSO refusals. Run the focused
+diagnostic command above and provide the first InfoQueue errors around the
+first `mesh fallback compute pipeline refused` message, plus the frame and
+memory lines near device suspension. Do not enable GPU-based validation on
+the first pass. This test is to identify the rejected PSO/resource contract;
+it is not yet a performance acceptance test.
 
 ## Reference comparison: avatarmanz/VIctory-7900XTX
 

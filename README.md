@@ -84,9 +84,11 @@ Resource Binding Tier 3 support also depend on the installed D3D12 runtime and
 driver; Windows 10 may require a suitable Agility SDK runtime.
 
 When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` defaults the title's
-reported render mode to `1280x720` if `VICTORY_DISPLAY_MODE` is unset. This
-reduces render-surface pressure on low-VRAM adapters; an explicit
-`VICTORY_DISPLAY_MODE=WxH` value is preserved.
+reported render mode to `1280x720` if `VICTORY_DISPLAY_MODE` is unset, caps
+card-side title-buffer shadows at 256 MiB, and enables parallel CPU refresh,
+snapshot and merge work plus batched GPU hash passes. Explicit environment
+overrides are preserved. This is a conservative experimental profile, not a
+guarantee of correct rendering or playable performance.
 
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
 details, limitations, validation status, and the next acceptance gates. The

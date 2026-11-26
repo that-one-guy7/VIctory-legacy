@@ -90,13 +90,14 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
         VICTORY_CARD_REHASH_RUNS = "1"
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
+        VICTORY_WIDE_REFRESH = "1"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name, "Process"))) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; parallel CPU snapshot/merge; batched GPU hash work; card-side buffer budget $env:VICTORY_CARD_BUFFERS_MB MB." -ForegroundColor Cyan
+    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; parallel CPU refresh/snapshot/merge; batched GPU hash work; card-side buffer budget $env:VICTORY_CARD_BUFFERS_MB MB." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
