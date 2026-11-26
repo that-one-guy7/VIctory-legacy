@@ -72,7 +72,7 @@ The launcher records effective `VICTORY_*` settings, Windows/PowerShell versions
 | `VICTORY_D3D12_DRED=1` | on a GPU failure, report the commands in flight |
 | `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
 
-Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`. When that executable is launched through `scripts\\play.ps1`, DRED is enabled automatically unless an explicit `VICTORY_D3D12_DRED` process value is already present. Release builds are unchanged.
+Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`. When that executable is launched through `scripts\play.ps1`, DRED is enabled automatically unless an explicit `VICTORY_D3D12_DRED` process value is already present. Release builds are unchanged.
 
 ## Mesh-shader fallback progress (2026-11-25)
 
