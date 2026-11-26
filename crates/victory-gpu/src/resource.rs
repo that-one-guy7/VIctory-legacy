@@ -487,6 +487,7 @@ fn twin_texture(
         )
     };
     if let Err(e) = made {
+        crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, "no colour twin for a depth texture");
     }
     let Some(texture) = texture else {
@@ -550,6 +551,7 @@ fn twin_texture(
             )
         };
         if let Err(e) = made {
+            crate::residency::allocation_error(&e);
             tracing::warn!(error = %e, desc = ?d, "no twin for a depth plane");
         }
         texture.map(|texture| {
@@ -1574,8 +1576,8 @@ pub(crate) fn room() -> bool {
 #[cfg(windows)]
 pub(crate) fn let_go_idle() {
     use std::sync::atomic::Ordering::Relaxed;
-    const IDLE_MS: u64 = 5_000;
-    const IDLE_FRAMES: u64 = 4;
+    let idle_ms = crate::residency::idle_timeout_ms(5_000);
+    let idle_frames = crate::residency::idle_timeout_frames(4);
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
@@ -1594,7 +1596,7 @@ pub(crate) fn let_go_idle() {
         let gone = {
             let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
             let idle = made.as_ref().is_some_and(|(host, _)| {
-                crate::host::long_ago(r.host.used.load(Relaxed), IDLE_MS, IDLE_FRAMES)
+                crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, idle_frames)
                     && std::sync::Arc::strong_count(host) == 1
                     && crate::host::references(&host.texture) == 1
             });
@@ -1868,6 +1870,7 @@ fn host_texture(
         )
     };
     if let Err(e) = made {
+        crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, "no host texture");
     }
     if let Some(t) = &texture {
@@ -2923,7 +2926,7 @@ mod tests {
                 None,
             );
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copy finished (execute waits); the buffer is 1024 bytes.
@@ -3094,7 +3097,7 @@ mod tests {
                 moved(host_depth, source, tested),
             ]);
         }
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copies finished (execute waits); the buffer is 1024 bytes.
@@ -3257,7 +3260,7 @@ mod tests {
             l.CopyTextureRegion(&whole(twin, 0), 0, 0, 0, &rows(&upload, pattern_rows), None);
             l.ResourceBarrier(&[moved(twin, dest, written)]);
         }
-        fill.close();
+        fill.close().unwrap();
         host.execute(&[&fill]);
 
         // A list in which a shader writes the twin: closing it copies the
@@ -3265,7 +3268,7 @@ mod tests {
         let list = host.new_list().unwrap();
         assert!(list.twin_use(depth, true, true));
         list.twins_written();
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
 
         // The stencil plane read back from the state the list left it in.
@@ -3280,7 +3283,7 @@ mod tests {
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
             l.ResourceBarrier(&[moved(host_depth, source, state)]);
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copies finished (execute waits); the buffer is 4096 bytes.
@@ -3484,7 +3487,7 @@ mod tests {
             l.CopyTextureRegion(&whole(plane), 0, 0, 0, &rows(&upload, rows_of(53)), None);
             l.ResourceBarrier(&[moved(plane, dest, written)]);
         }
-        fill.close();
+        fill.close().unwrap();
         host.execute(&[&fill]);
 
         // A list in which a shader writes the twins: closing it draws the
@@ -3492,7 +3495,7 @@ mod tests {
         let list = host.new_list().unwrap();
         assert!(list.twin_use(depth, true, true));
         list.twins_written();
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
 
         // The draws: a triangle over the target at the depth of a class,
@@ -3600,7 +3603,7 @@ float4 lit() : SV_Target { return 1.0; }
             let (to, from) = (rows(&readback, rows_of(61)), whole(&target));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copy finished (execute waits); the buffer is 1024 bytes.

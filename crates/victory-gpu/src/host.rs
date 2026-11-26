@@ -144,6 +144,7 @@ fn sweep() {
     {
         return;
     }
+    crate::residency::refresh();
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
@@ -739,6 +740,9 @@ mod tests {
 pub(crate) struct HostList {
     allocator: ID3D12CommandAllocator,
     pub(crate) list: ID3D12GraphicsCommandList,
+    /// Non-zero HRESULT when D3D12 rejected this list at Close. Such a list
+    /// must never be passed to ExecuteCommandLists.
+    close_error: std::sync::atomic::AtomicI32,
     /// Work for submission time, in recorded order.
     deferred: Mutex<Deferred>,
     /// Upload memory for data the list's draws make (expanded vertices),
@@ -3173,6 +3177,7 @@ impl Host {
             Ok(HostList {
                 allocator,
                 list,
+                close_error: std::sync::atomic::AtomicI32::new(0),
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 mesh_scratch: Mutex::default(),
@@ -4200,7 +4205,28 @@ impl Host {
     /// [`Host::execute_late`]: the lists are prepared and sent, and what is
     /// to be done once they have run comes back with the submission lock
     /// still held.
-    fn submit<'a>(&'a self, runs: &[&HostList], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+    fn submit<'a>(&'a self, input_runs: &[&HostList], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+        // Avoid allocating on the normal path; build a filtered view only
+        // when D3D12 actually rejected one or more lists at Close.
+        let has_failed = input_runs.iter().any(|run| run.close_failed());
+        let filtered_runs = has_failed.then(|| {
+            input_runs
+                .iter()
+                .copied()
+                .filter(|run| !run.close_failed())
+                .collect::<Vec<_>>()
+        });
+        let runs = filtered_runs.as_deref().unwrap_or(input_runs);
+        if has_failed {
+            tracing::error!(
+                skipped = input_runs.len() - runs.len(),
+                total = input_runs.len(),
+                "omitting D3D12 command lists whose Close call failed"
+            );
+        }
+        if runs.is_empty() {
+            return None;
+        }
         #[cfg(feature = "diagnostics")]
         let called = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -4769,7 +4795,7 @@ impl HostList {
         times
     }
 
-    pub(crate) fn close(&self) {
+    pub(crate) fn close(&self) -> windows::core::Result<()> {
         self.twins_to_depth();
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
@@ -4780,12 +4806,22 @@ impl HostList {
                 self.list.ResolveQueryData(heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, count + 1, back, 0);
             }
         }
-        // SAFETY: our list.
-        if let Err(e) = unsafe { self.list.Close() } {
-            fail(format_args!(
-                "a host command list did not close ({e}): a command recorded into it was invalid"
-            ));
+        // SAFETY: our list. A failed Close is returned to the title and the
+        // list is excluded from GPU submission rather than panicking here.
+        if let Err(error) = unsafe { self.list.Close() } {
+            self.close_error.store(error.code().0, Ordering::Release);
+            crate::residency::allocation_error(&error);
+            tracing::error!(
+                hresult = %error.code(),
+                "D3D12 rejected a host command list at Close; it will be skipped"
+            );
+            return Err(error);
         }
+        Ok(())
+    }
+
+    fn close_failed(&self) -> bool {
+        self.close_error.load(Ordering::Acquire) != 0
     }
 
     /// Only after the list's last submission finished (every one is waited
@@ -4819,6 +4855,7 @@ impl HostList {
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
         }
+        self.close_error.store(0, Ordering::Release);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
     }
@@ -5910,6 +5947,7 @@ impl Host {
         match made {
             Ok(()) => buffer,
             Err(e) => {
+                crate::residency::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no read-back buffer");
                 None
             }
@@ -5958,6 +5996,7 @@ impl Host {
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
+                crate::residency::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
             }
@@ -6303,7 +6342,10 @@ impl Host {
                 let finished = FINISHED.load(Ordering::Acquire);
                 p.ahead.iter().position(|(_, flown)| *flown <= finished).or_else(|| {
                     let list = self.new_list().ok()?;
-                    list.close();
+                    if let Err(error) = list.close() {
+                        tracing::warn!(error = %error, "no closed list for a future present");
+                        return None;
+                    }
                     p.ahead.push((list, 0));
                     Some(p.ahead.len() - 1)
                 })
@@ -6341,7 +6383,10 @@ impl Host {
                     D3D12_RESOURCE_STATE_PRESENT,
                 ),
             ]);
-            copy.close();
+            if let Err(error) = copy.close() {
+                tracing::warn!(error = %error, "present copy list did not close");
+                return None;
+            }
             match slot {
                 Some(i) => {
                     let flown = self.execute_own(copy);
@@ -6392,7 +6437,7 @@ impl Host {
                 .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
                 .cast::<IDXGISwapChain3>()?;
             let copy = self.new_list()?;
-            copy.close();
+            copy.close()?;
             tracing::info!(width, height, format = format.0, "presenting to a window");
             Ok(Presenter {
                 swap_chain,
@@ -6524,6 +6569,7 @@ impl Host {
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
+                crate::residency::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no shared buffer");
                 None
             }
@@ -6570,6 +6616,7 @@ impl Host {
         match made {
             Ok(()) => buffer,
             Err(e) => {
+                crate::residency::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no unordered-access buffer");
                 None
             }

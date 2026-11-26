@@ -1196,7 +1196,7 @@ void main() {
             "larger request must grow scratch buffer"
         );
 
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
         list.reset();
 
@@ -1209,7 +1209,7 @@ void main() {
             b3.as_raw(),
             "grown scratch buffer must persist across reset"
         );
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
         list.reset();
     }
