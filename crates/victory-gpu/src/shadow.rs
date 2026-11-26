@@ -970,6 +970,15 @@ struct Workers {
     more: std::sync::Condvar,
 }
 
+/// Keep one copy worker for each estimated physical core besides the caller.
+/// On Windows, available_parallelism commonly reports logical processors;
+/// the i7-6700 has 8 logical processors but 4 physical cores.
+fn wide_worker_count(logical: usize) -> usize {
+    let logical = logical.max(1);
+    let physical = if logical > 4 { logical.div_ceil(2) } else { logical };
+    physical.saturating_sub(1).clamp(1, 6)
+}
+
 fn workers() -> &'static Workers {
     static WORKERS: std::sync::OnceLock<Workers> = std::sync::OnceLock::new();
     static STARTED: std::sync::Once = std::sync::Once::new();
@@ -978,9 +987,11 @@ fn workers() -> &'static Workers {
         more: std::sync::Condvar::new(),
     });
     STARTED.call_once(|| {
-        let n = std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6);
-        for i in 0..n {
-            let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
+        let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let requested = wide_worker_count(logical);
+        let mut started = 0usize;
+        for i in 0..requested {
+            match std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
                 let workers = WORKERS.get().expect("made above");
                 loop {
                     let job = {
@@ -994,8 +1005,16 @@ fn workers() -> &'static Workers {
                     };
                     job();
                 }
-            });
+            }) {
+                Ok(_) => started += 1,
+                Err(error) => tracing::warn!(worker = i, %error, "could not start a parallel copy worker"),
+            }
         }
+        tracing::info!(
+            logical_processors = logical,
+            workers = started,
+            "parallel host-copy workers ready"
+        );
     });
     workers
 }
@@ -1237,6 +1256,15 @@ mod wide_tests {
     use super::{Job, PIECE, WIDE_JOB, copy_jobs, find_pieces, wide};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn wide_worker_count_scales_to_physical_cores() {
+        assert_eq!(super::wide_worker_count(1), 1);
+        assert_eq!(super::wide_worker_count(4), 3);
+        assert_eq!(super::wide_worker_count(8), 3);
+        assert_eq!(super::wide_worker_count(16), 6);
+        assert_eq!(super::wide_worker_count(32), 6);
+    }
 
     /// Every job runs once, however many there are, and `wide` returns
     /// only when all have.
