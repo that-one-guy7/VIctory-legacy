@@ -686,6 +686,83 @@ fn compute_mip_drop(desc:&ResourceDesc)->u32{
         crate::texture::texture_mip_drop_min_size())
 }
 
+/// Host-side render-target scale. Disabled unless explicitly requested.
+fn render_resolution_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        let raw = std::env::var("VICTORY_RENDER_SCALE").ok();
+        let parsed = raw.as_deref().and_then(|value| value.trim().parse::<f32>().ok());
+        let scale = match parsed {
+            None => 1.0,
+            Some(value) if value.is_finite() && (0.25..=1.0).contains(&value) => value,
+            Some(value) => {
+                tracing::warn!(value, "invalid VICTORY_RENDER_SCALE; expected 0.25 through 1.0");
+                1.0
+            }
+        };
+        if scale < 1.0 {
+            tracing::info!(scale, "host render-target resolution scaling enabled");
+        }
+        scale
+    })
+}
+
+/// Minimum original width and height for render-target scaling.
+fn render_resolution_min_size() -> u64 {
+    static SIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var("VICTORY_RENDER_SCALE_MIN_SIZE")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(512)
+    })
+}
+
+/// Returns reduced host dimensions only for safe first-pass candidates:
+/// 2D, single-mip, single-sample render/depth targets without UAV usage.
+fn scaled_render_target_extent(
+    desc: &ResourceDesc,
+    scale: f32,
+    min_size: u64,
+) -> Option<(u64, u32)> {
+    const TEXTURE_2D: u32 = 3;
+    const TARGET_OR_DEPTH: u32 = 0x1 | 0x2;
+    const UNORDERED: u32 = 0x4;
+    if !scale.is_finite()
+        || !(0.25..1.0).contains(&scale)
+        || desc.dimension != TEXTURE_2D
+        || desc.flags & TARGET_OR_DEPTH == 0
+        || desc.flags & UNORDERED != 0
+        || desc.sample_count > 1
+        || mip_count(desc) != 1
+        || desc.width < min_size
+        || u64::from(desc.height) < min_size
+    {
+        return None;
+    }
+    let width = (desc.width as f64 * f64::from(scale)).floor() as u64;
+    let height = (u64::from(desc.height) as f64 * f64::from(scale)).floor() as u32;
+    (width > 0 && height > 0 && width < desc.width && height < desc.height)
+        .then_some((width, height))
+}
+
+#[cfg(windows)]
+pub(crate) fn host_render_scale(this: This) -> (f32, f32) {
+    if this.is_null() {
+        return (1.0, 1.0);
+    }
+    let desc = resource(this).desc;
+    let Some((width, height)) = scaled_render_target_extent(
+        &desc,
+        render_resolution_scale(),
+        render_resolution_min_size(),
+    ) else {
+        return (1.0, 1.0);
+    };
+    (width as f32 / desc.width as f32, height as f32 / desc.height as f32)
+}
+
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1360,6 +1437,23 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             host_desc.mip_levels=title_mips.saturating_sub(mip_drop).max(1);
             tracing::info!(resource=?this,mip_drop,width=host_desc.width,height=host_desc.height,
                 "reducing sampled texture resolution for the host GPU");
+        }
+        if let Some((width, height)) = scaled_render_target_extent(
+            &r.desc,
+            render_resolution_scale(),
+            render_resolution_min_size(),
+        ) {
+            let original = (host_desc.width, host_desc.height);
+            host_desc.width = width;
+            host_desc.height = height;
+            tracing::info!(
+                resource = ?this,
+                original_width = original.0,
+                original_height = original.1,
+                width,
+                height,
+                "reducing render-target resolution for the host GPU"
+            );
         }
         let Some(texture) = host_texture(&host_desc, r.host.state, clear) else {
             r.host.refused.store(true, Relaxed);
@@ -2382,6 +2476,19 @@ mod tests {
         assert_eq!(map_subresource(10,8,2),Some(6));
         assert_eq!(map_subresource(15,8,2),Some(11));
         assert_eq!(map_subresource(5,8,0),Some(5));
+    }
+
+    #[test]
+    fn render_resolution_scale_only_changes_supported_render_targets() {
+        let base = texture(2048, 1024, 28, 1);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, ..base }, 0.5, 512), Some((1024, 512)));
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 2, ..base }, 0.5, 512), Some((1024, 512)));
+        assert_eq!(scaled_render_target_extent(&base, 0.5, 512), None);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 5, ..base }, 0.5, 512), None);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, sample_count: 4, ..base }, 0.5, 512), None);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, mip_levels: 2, ..base }, 0.5, 512), None);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, ..base }, 0.5, 1025), None);
+        assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, ..base }, 1.0, 512), None);
     }
 
     fn heap(size: u64) -> This {
