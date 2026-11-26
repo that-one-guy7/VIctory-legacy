@@ -200,7 +200,7 @@ mod tests {
     fn only_critical_host_memory_blocks_new_texture_staging() {
         assert!(!critical_memory(511 * MIB, 8 * GIB));
         assert!(!critical_memory(8 * GIB, 511 * MIB));
-        assert!(!critical_memory(1 * GIB, 8 * GIB));
+        assert!(!critical_memory(GIB, 8 * GIB));
         assert!(critical_memory(256 * MIB, 8 * GIB));
         assert!(critical_memory(8 * GIB, 256 * MIB));
     }
