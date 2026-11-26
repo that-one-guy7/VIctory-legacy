@@ -1324,9 +1324,10 @@ impl Drop for Scratch {
 }
 
 
-/// Shader-writable default-heap chunks used by mesh fallback dispatches.
-/// Data and indirect command memory use separate pools because they have
-/// different resource-state transitions.
+/// Shader-writable chunks used by mesh fallback dispatches. Data and
+/// indirect command memory use separate pools because they have different
+/// resource-state transitions. Local-memory residency is accounted globally
+/// across all host lists, not separately per list.
 #[derive(Default)]
 struct MeshScratch {
     pools: [Pool; 2],
@@ -1338,18 +1339,37 @@ pub(crate) enum ScratchPool {
     Commands = 1,
 }
 
+struct MeshChunk {
+    buffer: ID3D12Resource,
+    size: u64,
+    used: u64,
+    touched: bool,
+    /// Only default-heap chunks consume the global local-memory allowance.
+    local: bool,
+}
+
 #[derive(Default)]
 struct Pool {
-    chunks: Vec<(ID3D12Resource, u64, u64, bool)>,
+    chunks: Vec<MeshChunk>,
     current: usize,
     /// Allocation sizes already refused for this command-list lifetime.
-    /// Repeated 32 MiB UAV failures must not hammer D3D12 on every mesh draw.
     failed: std::collections::HashSet<u64>,
 }
 
 const MESH_CHUNK_FIRST: u64 = 1 << 20;
 const MESH_CHUNK: u64 = 4 << 20;
+/// Per-pool reuse limit; every host list has two pools.
 const MESH_POOL_BUDGET: u64 = 64 << 20;
+/// Aggregate local-memory ceiling shared by every mesh-scratch pool.
+const MESH_LOCAL_POOL_MAX: u64 = 512 << 20;
+static MESH_LOCAL_POOL_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_LOCAL_POOL_BUFFERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_SHARED_POOL_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_SHARED_POOL_BUFFERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) struct ScratchRegion {
     pub(crate) buffer: ID3D12Resource,
@@ -1357,28 +1377,40 @@ pub(crate) struct ScratchRegion {
     pub(crate) first: bool,
 }
 
+impl Drop for MeshChunk {
+    fn drop(&mut self) {
+        if self.local {
+            MESH_LOCAL_POOL_BYTES.fetch_sub(self.size, Ordering::AcqRel);
+            MESH_LOCAL_POOL_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            MESH_SHARED_POOL_BYTES.fetch_sub(self.size, Ordering::AcqRel);
+            MESH_SHARED_POOL_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Pool {
     fn region(
         &mut self,
         len: u64,
         rewind: bool,
-        make: impl FnOnce(u64) -> Option<ID3D12Resource>,
+        make: impl FnOnce(u64) -> Option<(ID3D12Resource, bool)>,
     ) -> Option<ScratchRegion> {
         // Data regions are consumed in command-list order. Each mesh draw
         // transitions its output buffer back to UAV after the graphics read,
-        // so the next draw can safely reuse the beginning of the first
-        // sufficiently large chunk instead of allocating another region.
+        // so the next draw can safely reuse the beginning of a sufficiently
+        // large chunk instead of allocating another region.
         if rewind {
-            for (_, _, used, _) in &mut self.chunks {
-                *used = 0;
+            for chunk in &mut self.chunks {
+                chunk.used = 0;
             }
             self.current = 0;
         }
         let len = len.max(16).next_multiple_of(256);
         let mut at = self.current;
         while at < self.chunks.len() {
-            let (_, size, used, _) = &self.chunks[at];
-            if used.checked_add(len).is_some_and(|end| end <= *size) {
+            let chunk = &self.chunks[at];
+            if chunk.used.checked_add(len).is_some_and(|end| end <= chunk.size) {
                 break;
             }
             at += 1;
@@ -1389,40 +1421,53 @@ impl Pool {
             let held = self
                 .chunks
                 .iter()
-                .fold(0u64, |sum, chunk| sum.saturating_add(chunk.1));
-            let fits = self.chunks.iter().position(|c| len <= c.1);
+                .fold(0u64, |sum, chunk| sum.saturating_add(chunk.size));
+            let fits = self.chunks.iter().position(|chunk| len <= chunk.size);
             if held.saturating_add(size) > MESH_POOL_BUDGET {
                 let first = fits?;
-                for (_, _, used, _) in &mut self.chunks {
-                    *used = 0;
+                for chunk in &mut self.chunks {
+                    chunk.used = 0;
                 }
                 at = first;
             } else {
                 if self.failed.contains(&size) {
                     return None;
                 }
-                let Some(buffer) = make(size) else {
+                let Some((buffer, local)) = make(size) else {
                     self.failed.insert(size);
                     return None;
                 };
-                self.chunks.push((buffer, size, 0, false));
+                if local {
+                    MESH_LOCAL_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    MESH_SHARED_POOL_BYTES.fetch_add(size, Ordering::Relaxed);
+                    MESH_SHARED_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                }
+                self.chunks.push(MeshChunk {
+                    buffer,
+                    size,
+                    used: 0,
+                    touched: false,
+                    local,
+                });
             }
         }
         self.current = at;
-        let (buffer, _, used, touched) = &mut self.chunks[at];
+        let chunk = &mut self.chunks[at];
         let region = ScratchRegion {
-            buffer: buffer.clone(),
-            offset: *used,
-            first: !*touched,
+            buffer: chunk.buffer.clone(),
+            offset: chunk.used,
+            first: !chunk.touched,
         };
-        *used = used.checked_add(len)?;
-        *touched = true;
+        chunk.used = chunk.used.checked_add(len)?;
+        chunk.touched = true;
         Some(region)
     }
 
     fn reset(&mut self) {
-        for (_, _, used, touched) in &mut self.chunks {
-            (*used, *touched) = (0, false);
+        for chunk in &mut self.chunks {
+            chunk.used = 0;
+            chunk.touched = false;
         }
         self.current = 0;
         self.failed.clear();
@@ -5144,9 +5189,11 @@ impl HostList {
     pub(crate) fn mesh_scratch(&self, len: u64, pool: ScratchPool) -> Option<ScratchRegion> {
         let mut scratch = self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.pools[pool as usize].region(len, pool == ScratchPool::Data, |size| {
-            let buffer = host()?.uav_buffer(size)?;
-            name(&buffer, || format!("mesh fallback {pool:?} {size:#x}"));
-            Some(buffer)
+            let host = host()?;
+            let (buffer, local) = host.mesh_scratch_buffer(size)?;
+            let kind = if local { "local" } else { "shared-memory fallback" };
+            name(&buffer, || format!("mesh fallback {pool:?} {size:#x} {kind}"));
+            Some((buffer, local))
         })
     }
 
@@ -6426,6 +6473,104 @@ impl Host {
         }
         self.uav_buffer(size)
     }
+
+    /// Use local VRAM for mesh scratch only while there is budget headroom
+    /// and room in the aggregate pool. Otherwise use a CPU-visible L0 UAV
+    /// buffer: slower for the GPU, but prevents per-list pools from consuming
+    /// several gigabytes together.
+    pub(crate) fn mesh_scratch_buffer(&self, size: u64) -> Option<(ID3D12Resource, bool)> {
+        let memory = self.video_memory();
+        let budget = memory.map_or(0, |m| m[0]);
+        let used = memory.map_or(0, |m| m[1]);
+        let limit = mesh_local_pool_limit(budget, configured_mesh_local_pool_cap());
+        if mesh_local_budget_allows(budget, used, size)
+            && reserve_mesh_local_pool(size, limit)
+        {
+            if let Some(buffer) = self.uav_buffer(size) {
+                return Some((buffer, true));
+            }
+            MESH_LOCAL_POOL_BYTES.fetch_sub(size, Ordering::AcqRel);
+        }
+        let (buffer, _) = self.shared_buffer(size)?;
+        tracing::warn!(
+            request_mb = size.div_ceil(1 << 20),
+            local_budget_mb = budget / (1 << 20),
+            local_used_mb = used / (1 << 20),
+            mesh_local_pool_mb = MESH_LOCAL_POOL_BYTES.load(Ordering::Relaxed) / (1 << 20),
+            mesh_local_limit_mb = limit / (1 << 20),
+            "mesh fallback scratch uses CPU-visible shared memory instead of local VRAM"
+        );
+        Some((buffer, false))
+    }
+}
+
+/// The automatic mesh scratch allowance is 15% of the DXGI local budget,
+/// capped at 512 MiB. An explicit setting may lower, but never raise, it.
+fn mesh_local_pool_limit(budget: u64, configured: Option<u64>) -> u64 {
+    let automatic = if budget == 0 {
+        MESH_LOCAL_POOL_MAX
+    } else {
+        (budget / 100 * 15).min(MESH_LOCAL_POOL_MAX)
+    };
+    configured.map_or(automatic, |cap| cap.min(automatic))
+}
+
+/// `VICTORY_MESH_LOCAL_BUDGET_MB` can lower the automatic local scratch cap.
+fn configured_mesh_local_pool_cap() -> Option<u64> {
+    static CAP: OnceLock<Option<u64>> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("VICTORY_MESH_LOCAL_BUDGET_MB")
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1 << 20)
+    })
+}
+
+/// Keep new scratch allocations below 80% of the current DXGI local budget.
+/// A missing budget retains the aggregate cap as a conservative fallback.
+fn mesh_local_budget_allows(budget: u64, used: u64, request: u64) -> bool {
+    if budget == 0 {
+        return true;
+    }
+    let limit = budget / 100 * 80;
+    used < limit && request <= limit - used
+}
+
+/// Atomically reserves bytes across every HostList's mesh pools.
+fn reserve_mesh_local_pool(size: u64, limit: u64) -> bool {
+    let mut used = MESH_LOCAL_POOL_BYTES.load(Ordering::Acquire);
+    loop {
+        let Some(next) = used.checked_add(size) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match MESH_LOCAL_POOL_BYTES.compare_exchange_weak(
+            used,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => used = actual,
+        }
+    }
+}
+
+/// Live mesh-scratch chunks: local buffer count/bytes, then shared buffer
+/// count/bytes. Exposed to diagnostics so hardware runs can confirm which
+/// scratch path was actually used.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn mesh_scratch_stats() -> [u64; 4] {
+    [
+        MESH_LOCAL_POOL_BUFFERS.load(Ordering::Relaxed),
+        MESH_LOCAL_POOL_BYTES.load(Ordering::Relaxed),
+        MESH_SHARED_POOL_BUFFERS.load(Ordering::Relaxed),
+        MESH_SHARED_POOL_BYTES.load(Ordering::Relaxed),
+    ]
 }
 
 /// Leaves 15% of the reported local-memory budget available for the
@@ -6749,5 +6894,30 @@ mod local_uav_budget {
     #[test]
     fn unavailable_budget_does_not_block_allocations() {
         assert!(local_uav_budget_allows(0, u64::MAX, u64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod mesh_scratch_budget_tests {
+    use super::{mesh_local_budget_allows, mesh_local_pool_limit, MESH_LOCAL_POOL_MAX};
+
+    #[test]
+    fn aggregate_limit_scales_with_budget_and_caps_at_512_mib() {
+        const MIB: u64 = 1 << 20;
+        const GIB: u64 = 1 << 30;
+        assert_eq!(mesh_local_pool_limit(0, None), MESH_LOCAL_POOL_MAX);
+        assert_eq!(mesh_local_pool_limit(4 * GIB, None), 512 * MIB);
+        assert_eq!(mesh_local_pool_limit(2 * GIB, None), (2 * GIB / 100) * 15);
+        assert_eq!(mesh_local_pool_limit(4 * GIB, Some(256 * MIB)), 256 * MIB);
+        assert_eq!(mesh_local_pool_limit(4 * GIB, Some(1024 * MIB)), 512 * MIB);
+    }
+
+    #[test]
+    fn local_scratch_stops_before_crossing_80_percent_of_dxgi_budget() {
+        assert!(mesh_local_budget_allows(1000, 700, 100));
+        assert!(!mesh_local_budget_allows(1000, 800, 1));
+        assert!(!mesh_local_budget_allows(1000, 790, 11));
+        assert!(!mesh_local_budget_allows(1000, 950, 1));
+        assert!(mesh_local_budget_allows(0, u64::MAX, u64::MAX));
     }
 }

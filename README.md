@@ -108,27 +108,32 @@ wholesale into this repository.
 
 ### Latest GTX 1050 Ti diagnostic (2026-11-26)
 
-The newest `ztrx(10).log` did not reach a visible 3D scene. It ended at
-frame 2294 when a D3D12 command-list prelude failed with
-`0x8007000E`. The final detailed sample showed 18.0 GB private process
-memory, 446 MB free system RAM, 2.72 GB of host textures and 3.13 GB of
-card buffers. The submitting thread was busy for 0.51–0.94 seconds in
-sampled frames while the GPU was only about 21–39% busy. This points to
-memory pressure and CPU submission overhead, not a GPU that is simply
-underpowered at rendering.
+The uploaded `ztrx.log` reached frame 2341, then lost the D3D12 device.
+This run had the requested low-VRAM settings active, including
+`VICTORY_CARD_BUFFERS=0` and `VICTORY_RENDER_SCALE=1.0`. The launcher
+reported about 12 GB of free physical RAM at startup, so the evidence points
+to GPU-local allocation pressure rather than an already-exhausted page file.
 
-The same log shows 522 card buffers alive, so the launcher’s
-`VICTORY_CARD_BUFFERS=0` default was not confirmed active; the launcher
-preserves explicit environment overrides. It now writes the effective
-settings into `%TEMP%\ztrx.log`, and the D3D12 prelude failure now reports
-whether allocator creation, command-list creation or list close failed.
+The decisive memory samples showed 6,612 MB of local GPU usage against a
+3,403 MB DXGI budget, plus 4,707 MB of shared GPU memory in use. The wrapper
+had about 2,349 MB of host textures alive. The separate "made so far" counter
+listed 570 device-local UAV/card-buffer allocations totalling 4,068 MB since
+startup; that is cumulative allocation history, **not** a live-bytes figure,
+and it does not identify every allocation as mesh scratch. Repeated 32 MiB
+UAV and 1 MiB shared-buffer allocations then failed with `0x8007000E`;
+black frames followed, then the device was removed (`0x887A0005`). The last reported
+`0x887A0004` is a post-removal device reason, not proof that one specific
+unsupported feature caused the initial failure.
 
-Upstream VIctory issue [#417](https://github.com/Marvisak/VIctory/issues/417)
-reports the same `0x1c8` and `0x218` warnings. Upstream PR
-[#518](https://github.com/Marvisak/VIctory/pull/518) found that returning
-`S_OK` without writing the methods' output parameters crashes title worker
-threads; those methods must remain unsupported until their contracts are
-identified. See [the detailed log analysis and PortWatch comparison](docs/mesh-fallback-port.md).
+`VICTORY_CARD_BUFFERS=0` disables optional copies of title buffers; it does
+not disable required mesh-fallback scratch or all other device-local buffers.
+The crash fix therefore bounds mesh scratch across *all* host command lists,
+not merely inside each list, and moves new scratch allocations to CPU-visible
+shared memory when local VRAM is too full. Shared-memory fallback may reduce
+GPU performance, but it avoids continuing to grow default-heap scratch pools
+past the adapter's budget. This is a targeted mitigation, not a global D3D12
+memory cap; textures, render targets and other resource classes remain
+separately allocated.
 
 ### Compatibility-layer research
 
@@ -150,6 +155,22 @@ Required mesh scratch and indirect-argument buffers retain their prior
 allocation path so a budget refusal cannot silently disable core rendering
 work. This is still advisory rather than a global VRAM cap; see
 [docs/local-uav-memory-headroom.md](docs/local-uav-memory-headroom.md).
+
+### Mesh-scratch local-memory cap (2026-11-26)
+
+The mesh fallback's 64 MiB scratch limit used to apply separately to each
+command-list pool. Hundreds of live lists could therefore retain several
+gigabytes of default-heap UAV scratch. New chunks share one process-wide
+local-memory allowance (15% of DXGI's local budget, capped at 512 MiB by
+default), and new allocations stop using local VRAM when current DXGI usage
+reaches 80% of budget. Once either limit is reached, new mesh scratch uses a
+CPU-visible shared-memory UAV buffer. This can reduce performance but avoids
+adding more local allocations. `VICTORY_MESH_LOCAL_BUDGET_MB` may lower the
+automatic allowance; it cannot raise it.
+The new diagnostics build also reports live mesh scratch separately:
+local default-heap chunks and CPU-visible shared-memory fallback chunks. This
+will distinguish retained mesh-pool memory from the cumulative "made so far"
+buffer counters in the next hardware log.
 
 ## License
 
