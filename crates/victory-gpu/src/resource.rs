@@ -1508,13 +1508,22 @@ pub(crate) fn host_made<'a>(
     Some(unsafe { &*std::ptr::from_ref(&host.texture) })
 }
 
+/// Whether the process is below the local-memory threshold used before
+/// making another indexed texture copy. The configured cap can only lower
+/// the driver's own budget; it can never raise it.
+fn local_texture_budget_allows(budget: u64, used: u64, configured_cap: Option<u64>) -> bool {
+    if budget == 0 { return false; }
+    let driver_limit = budget / 100 * 85;
+    let limit = configured_cap.map_or(driver_limit, |cap| cap.min(driver_limit));
+    used < limit
+}
+
 /// Whether more host copies of textures the title fills may be made for
-/// shaders that pick textures by index (`draw.rs` `heap_textures`): always
-/// up to `FLOOR` bytes of them, beyond that while the card's memory in use
-/// by this process is under nine tenths of the budget the system gives it
-/// (`VICTORY_TEXTURE_BUDGET_MB` sets a limit on those copies' bytes
-/// instead). Past the budget the system moves the card's memory into the
-/// PC's, which ended runs 20 and 24.
+/// shaders that pick textures by index. With a local DXGI budget, stop at
+/// 85% of that budget by default; VICTORY_LOCAL_TEXTURE_BUDGET_MB can impose
+/// a lower absolute ceiling. VICTORY_TEXTURE_BUDGET_MB remains the separate
+/// cap on these copies' own alive bytes. This gate applies to indexed texture
+/// copies only, not every D3D12 allocation made by the wrapper.
 #[cfg(windows)]
 pub(crate) fn room() -> bool {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1523,21 +1532,22 @@ pub(crate) fn room() -> bool {
     static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let limit = *LIMIT.get_or_init(|| {
         let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
-        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
+        mb.trim().parse::<u64>().ok().and_then(|mb| mb.checked_mul(1 << 20))
     });
     let filled = KINDS[1].load(Relaxed);
-    if let Some(limit) = limit {
-        return filled < limit;
+    if let Some(limit) = limit { return filled < limit; }
+    static LOCAL_CAP: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let local_cap = *LOCAL_CAP.get_or_init(|| {
+        std::env::var("VICTORY_LOCAL_TEXTURE_BUDGET_MB").ok()?
+            .trim().parse::<u64>().ok().filter(|&mb| mb > 0)
+            .and_then(|mb| mb.checked_mul(1 << 20))
+    });
+    if let Some([budget, used, ..]) = crate::host::host().and_then(|h| h.video_memory()) {
+        return local_texture_budget_allows(budget, used, local_cap);
     }
-    if filled < FLOOR {
-        return true;
-    }
-    match crate::host::host().and_then(|h| h.video_memory()) {
-        Some([budget, used, ..]) => used < budget / 10 * 9,
-        None => filled < WITHOUT_BUDGET,
-    }
+    if filled < FLOOR { return true; }
+    filled < WITHOUT_BUDGET
 }
-
 /// Lets go of the host copies of textures the title fills that nothing
 /// names any more: placed textures were never released (one host texture
 /// per address and description ever viewed: 18,639 of them, 2.5 GB, after
@@ -2478,6 +2488,16 @@ mod tests {
         assert_eq!(map_subresource(5,8,0),Some(5));
     }
 
+    #[test]
+    fn local_texture_budget_never_exceeds_driver_budget() {
+        const MIB: u64 = 1 << 20;
+        assert!(local_texture_budget_allows(4_000 * MIB, 3_000 * MIB, None));
+        assert!(!local_texture_budget_allows(4_000 * MIB, 3_500 * MIB, None));
+        assert!(local_texture_budget_allows(4_000 * MIB, 2_900 * MIB, Some(3_000 * MIB)));
+        assert!(!local_texture_budget_allows(4_000 * MIB, 3_000 * MIB, Some(3_000 * MIB)));
+        assert!(!local_texture_budget_allows(2_500 * MIB, 2_200 * MIB, Some(3_000 * MIB)));
+        assert!(!local_texture_budget_allows(0, 0, None));
+    }
     #[test]
     fn render_resolution_scale_only_changes_supported_render_targets() {
         let base = texture(2048, 1024, 28, 1);
