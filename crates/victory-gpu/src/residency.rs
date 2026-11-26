@@ -81,8 +81,6 @@ pub(crate) fn refresh() {
             tracing::warn!(
                 physical_free_mib = physical / MIB,
                 available_commit_mib = commit / MIB,
-                shadow_window_mib = crate::shadow::memory_bytes() / MIB,
-                staging_mib = crate::texture::live_staging_bytes() / MIB,
                 "host memory pressure: shortening idle-copy retention; required rendering allocations remain enabled"
             );
         } else {
@@ -160,20 +158,28 @@ pub(crate) fn allow_texture_staging(bytes: u64) -> bool {
 
 /// Shorten idle retention only while sustained host memory pressure is active.
 /// The existing reference-count and command-list ownership checks remain intact.
-pub(crate) fn idle_timeout_ms(normal: u64) -> u64 {
-    if PRESSURED.load(Ordering::Relaxed) {
+fn pressure_idle_timeout_ms(pressured: bool, normal: u64) -> u64 {
+    if pressured {
         normal.min(5_000)
     } else {
         normal
     }
 }
 
-pub(crate) fn idle_timeout_frames(normal: u64) -> u64 {
-    if PRESSURED.load(Ordering::Relaxed) {
+fn pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
+    if pressured {
         normal.min(2)
     } else {
         normal
     }
+}
+
+pub(crate) fn idle_timeout_ms(normal: u64) -> u64 {
+    pressure_idle_timeout_ms(PRESSURED.load(Ordering::Relaxed), normal)
+}
+
+pub(crate) fn idle_timeout_frames(normal: u64) -> u64 {
+    pressure_idle_timeout_frames(PRESSURED.load(Ordering::Relaxed), normal)
 }
 
 #[cfg(test)]
@@ -201,7 +207,9 @@ mod tests {
 
     #[test]
     fn pressure_shortens_only_idle_retention() {
-        assert_eq!(5_000, if true { 10_000u64.min(5_000) } else { 10_000 });
-        assert_eq!(2, if true { 4u64.min(2) } else { 4 });
+        assert_eq!(10_000, pressure_idle_timeout_ms(false, 10_000));
+        assert_eq!(5_000, pressure_idle_timeout_ms(true, 10_000));
+        assert_eq!(2, pressure_idle_timeout_frames(true, 4));
+        assert_eq!(4, pressure_idle_timeout_frames(false, 4));
     }
 }
