@@ -167,6 +167,18 @@ of a resource leak: the code's counter includes title-created host lists that
 have not been used/reset. They must not be forcibly reset while the title may
 still use them.
 
+For the next crash-focused diagnostics run, `scripts/play.ps1` now enables
+`VICTORY_D3D12_DEBUG=1` automatically when using the `diag` profile with
+`VICTORY_MESH_FALLBACK=1` (unless an explicit process value is already set).
+This activates the D3D12 debug layer and records its first validation error
+when a command list fails to close. GPU-based validation
+(`VICTORY_D3D12_GBV`) remains opt-in because of its substantially higher
+overhead; the in-place memory probe remains read-only and
+`VICTORY_INPLACE` stays disabled. This change improves the evidence for the
+failure but does **not** claim the offending command has already been fixed.
+The next log should include the specific D3D12 validation message needed to
+select a safe code fix.
+
 For the next diagnostics build, the low-VRAM launcher now sets
 VICTORY_INPLACE_PROBE=2 by default (unless explicitly overridden). The
 probe tests whether this driver can expose eligible title-owned private memory
