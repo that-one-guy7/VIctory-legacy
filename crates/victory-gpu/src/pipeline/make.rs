@@ -28,6 +28,8 @@ pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
     pub(crate) graphics: Option<Box<GraphicsState>>,
     queue_state: AtomicU8,
+    /// Taken by a worker from the known-slow background queue.
+    was_slow: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
@@ -53,6 +55,7 @@ impl Pending {
             shaders,
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
+            was_slow: AtomicBool::new(false),
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
@@ -60,8 +63,12 @@ impl Pending {
     }
 
     fn make(&self) {
-        self.made
-            .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
+        self.made.get_or_init(|| {
+            let started = Instant::now();
+            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
+            super::library::note_time(&self.key, started.elapsed().as_millis() as u64);
+            made
+        });
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
@@ -218,8 +225,25 @@ const EARLY: u8 = 1;
 const REQUESTED: u8 = 2;
 const MAKING: u8 = 3;
 
+fn slow_limit() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        if std::env::var_os("VICTORY_PIPELINE_SLOW").is_some_and(|v| v == "0") {
+            usize::MAX
+        } else {
+            let logical = std::thread::available_parallelism().map_or(2, |n| n.get());
+            let configured = std::env::var("VICTORY_PIPELINE_WORKERS")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok());
+            (worker_count(logical, configured) / 4).max(1)
+        }
+    })
+}
+
 struct Queue {
     early: VecDeque<Arc<Pending>>,
+    slow: VecDeque<Arc<Pending>>,
+    slow_now: usize,
     requested: VecDeque<Arc<Pending>>,
 }
 
@@ -227,13 +251,19 @@ impl Queue {
     const fn new() -> Self {
         Self {
             early: VecDeque::new(),
+            slow: VecDeque::new(),
+            slow_now: 0,
             requested: VecDeque::new(),
         }
     }
 
-    /// Queues an unrequested pipeline or promotes one queued at creation.
-    /// Returns whether it is new to the queue, or `None` if nothing changed.
+    /// Queues a pipeline or promotes one already queued at creation.
     fn push(&mut self, p: &Arc<Pending>, priority: u8) -> Option<bool> {
+        let is_slow = priority != REQUESTED && super::library::slow(&p.key);
+        self.push_as(p, priority, is_slow)
+    }
+
+    fn push_as(&mut self, p: &Arc<Pending>, priority: u8, is_slow: bool) -> Option<bool> {
         let prev = p.queue_state.load(Ordering::Relaxed);
         if prev >= priority {
             return None;
@@ -241,18 +271,33 @@ impl Queue {
         p.queue_state.store(priority, Ordering::Relaxed);
         if priority == REQUESTED {
             self.requested.push_back(p.clone());
+        } else if is_slow {
+            self.slow.push_back(p.clone());
         } else {
             self.early.push_back(p.clone());
         }
         Some(prev == NOT_QUEUED)
     }
 
-    fn pop(&mut self) -> Option<Arc<Pending>> {
-        let p = self.requested.pop_front().or_else(|| {
-            // An early entry can have been promoted and claimed already.
-            std::iter::from_fn(|| self.early.pop_front())
-                .find(|p| p.queue_state.load(Ordering::Relaxed) == EARLY)
-        })?;
+    fn unclaimed(list: &mut VecDeque<Arc<Pending>>) -> Option<Arc<Pending>> {
+        std::iter::from_fn(|| list.pop_front())
+            .find(|p| p.queue_state.load(Ordering::Relaxed) == EARLY)
+    }
+
+    fn pop(&mut self, limit: usize) -> Option<Arc<Pending>> {
+        let p = self.requested.pop_front()
+            .or_else(|| Self::unclaimed(&mut self.early))
+            .or_else(|| {
+                if self.slow_now >= limit {
+                    return None;
+                }
+                let p = Self::unclaimed(&mut self.slow);
+                if let Some(p) = &p {
+                    p.was_slow.store(true, Ordering::Relaxed);
+                    self.slow_now += 1;
+                }
+                p
+            })?;
         p.queue_state.store(MAKING, Ordering::Relaxed);
         Some(p)
     }
@@ -285,7 +330,7 @@ fn start(p: &Arc<Pending>, priority: u8) {
 fn next() -> Arc<Pending> {
     let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        if let Some(p) = queue.pop() {
+        if let Some(p) = queue.pop(slow_limit()) {
             return p;
         }
         queue = AVAILABLE.wait(queue).unwrap_or_else(|e| e.into_inner());
@@ -321,7 +366,13 @@ fn workers() -> bool {
                         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                     }
                     loop {
-                        next().make();
+                        let p = next();
+                        p.make();
+                        if p.was_slow.swap(false, Ordering::Relaxed) {
+                            let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                            queue.slow_now = queue.slow_now.saturating_sub(1);
+                            AVAILABLE.notify_all();
+                        }
                         if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                             drained();
                         } else {
@@ -376,6 +427,28 @@ mod tests {
         assert_eq!(worker_count(8, Some(64)), 8);
     }
 
+
+    #[test]
+    fn known_slow_early_work_is_throttled_but_draw_requests_are_not() {
+        let slow_a = Arc::new(Pending::new(Vec::new(), None));
+        let slow_b = Arc::new(Pending::new(Vec::new(), None));
+        let requested = Arc::new(Pending::new(Vec::new(), None));
+        let mut queue = Queue::new();
+
+        assert_eq!(queue.push_as(&slow_a, EARLY, true), Some(true));
+        assert_eq!(queue.push_as(&slow_b, EARLY, true), Some(true));
+        assert!(queue.pop(1).is_some());
+        let held = Arc::clone(&slow_a);
+        assert!(held.was_slow.load(Ordering::Relaxed));
+        assert_eq!(queue.slow_now, 1);
+        assert!(queue.pop(1).is_none(), "a second known-slow compile must wait");
+
+        assert_eq!(queue.push_as(&requested, REQUESTED, false), Some(true));
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &requested), "draw-requested work bypasses the slow queue");
+        queue.slow_now = 0;
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &slow_b));
+    }
+
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).
     #[test]
@@ -417,10 +490,10 @@ mod tests {
         assert_eq!(queue.push(&promoted, REQUESTED), Some(false));
         assert_eq!(queue.push(&promoted, REQUESTED), None);
 
-        assert!(Arc::ptr_eq(&queue.pop().unwrap(), &requested));
-        assert!(Arc::ptr_eq(&queue.pop().unwrap(), &promoted));
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &requested));
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &promoted));
         assert_eq!(queue.push(&promoted, REQUESTED), None);
-        assert!(Arc::ptr_eq(&queue.pop().unwrap(), &earlier));
-        assert!(queue.pop().is_none());
+        assert!(Arc::ptr_eq(&queue.pop(1).unwrap(), &earlier));
+        assert!(queue.pop(1).is_none());
     }
 }
