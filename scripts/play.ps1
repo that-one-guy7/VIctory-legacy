@@ -123,7 +123,16 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
         [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_D3D12_DEBUG", "Process"))) {
         $env:VICTORY_D3D12_DEBUG = "1"
     }
-    Write-Host "Low-VRAM mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS; in-place memory probe=$env:VICTORY_INPLACE_PROBE; D3D12 debug layer=$env:VICTORY_D3D12_DEBUG." -ForegroundColor Cyan
+    # The latest DRED run lost the device during an 8-list batch that took
+    # 2.569 seconds. Split diagnostics submissions per host list and record
+    # GPU timestamps for the slow commands. This is deliberately diagnostics-
+    # only; it may be slower, but it can identify a single list/command that
+    # takes long enough to trigger a driver reset. Explicit values win.
+    if ($ProfileName -eq "diag" -and
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_GPU_TIMING", "Process"))) {
+        $env:VICTORY_GPU_TIMING = "1"
+    }
+    Write-Host "Low-VRAM mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS; in-place memory probe=$env:VICTORY_INPLACE_PROBE; D3D12 debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$env:VICTORY_GPU_TIMING." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
