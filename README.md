@@ -91,14 +91,19 @@ GTX 1050 Ti's 4 GB VRAM is a substantial constraint. Shader Model 6.6 and
 Resource Binding Tier 3 support also depend on the installed D3D12 runtime and
 driver; Windows 10 may require a suitable Agility SDK runtime.
 
-When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` defaults the title's
-reported render mode to `1280x720` if `VICTORY_DISPLAY_MODE` is unset, disables
-extra GPU-local title-buffer shadows (`VICTORY_CARD_BUFFERS=0`) to leave more
-VRAM for textures and mesh scratch, and enables parallel CPU refresh, snapshot
-and merge work plus batched GPU hash passes. Explicit environment overrides
-are preserved. Disabling the extra GPU-local copies favors stability over
-their faster memory path; this is still an experimental profile, not a
-guarantee of correct rendering or playable performance.
+When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` enables a stricter
+low-VRAM profile by default: title mode `1280x720`, no extra GPU-local
+title-buffer shadows, half-scale eligible host render/depth targets, two
+dropped top mip levels on eligible large sampled textures, a 128 MiB aggregate
+local mesh-scratch cap, and a 70% local-memory threshold for optional UAV
+optimizations. New mesh scratch beyond the local cap uses CPU-visible shared
+memory, which is slower but preserves the required scratch path. Explicit
+environment overrides are preserved. These changes can reduce image quality
+and performance, do not cap every D3D12 allocation, and do not guarantee
+correct rendering or playable performance.
+
+See [docs/local-uav-memory-headroom.md](docs/local-uav-memory-headroom.md)
+for the stricter profile and its allocation limits.
 
 See [docs/mesh-fallback-port.md](docs/mesh-fallback-port.md) for implementation
 details, limitations, validation status, and the next acceptance gates. The
