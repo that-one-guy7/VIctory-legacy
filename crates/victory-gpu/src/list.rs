@@ -305,13 +305,14 @@ fn record_close_error(
     error: &windows::core::Error,
 ) -> HRESULT {
     let code = error.code().0;
-    let _ = close_error.compare_exchange(
-        S_OK,
-        code,
-        std::sync::atomic::Ordering::AcqRel,
-        std::sync::atomic::Ordering::Acquire,
-    );
-    code
+    close_error
+        .compare_exchange(
+            S_OK,
+            code,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .unwrap_or_else(|first_error| first_error)
 }
 
 #[cfg(windows)]
