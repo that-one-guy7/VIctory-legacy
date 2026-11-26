@@ -80,13 +80,14 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 
-# The experimental mesh fallback is memory- and CPU-intensive. Use a
-# conservative VRAM shadow budget, parallelize CPU snapshot/merge work, and
-# combine repeated GPU hash dispatches. Explicit user values take precedence.
+# The experimental mesh fallback is memory- and CPU-intensive. On low-VRAM
+# adapters, keep large title-buffer shadows in CPU-visible memory rather than
+# creating a second GPU-local copy that competes with textures and mesh scratch.
+# Explicit user values take precedence.
 if ($env:VICTORY_MESH_FALLBACK -eq "1") {
     $MeshFallbackDefaults = [ordered]@{
         VICTORY_DISPLAY_MODE = "1280x720"
-        VICTORY_CARD_BUFFERS_MB = "256"
+        VICTORY_CARD_BUFFERS = "0"
         VICTORY_CARD_REHASH_RUNS = "1"
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
@@ -97,7 +98,7 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; parallel CPU refresh/snapshot/merge; batched GPU hash work; card-side buffer budget $env:VICTORY_CARD_BUFFERS_MB MB." -ForegroundColor Cyan
+    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS; parallel CPU refresh/snapshot/merge; batched GPU hash work." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
