@@ -95,12 +95,16 @@ When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` enables a stricter
 low-VRAM profile by default: title mode `1280x720`, no extra GPU-local
 title-buffer shadows, half-scale eligible host render/depth targets, two
 dropped top mip levels on eligible large sampled textures, a 128 MiB aggregate
-local mesh-scratch cap, and a 70% local-memory threshold for optional UAV
-optimizations. New mesh scratch beyond the local cap uses CPU-visible shared
-memory, which is slower but preserves the required scratch path. Explicit
-environment overrides are preserved. These changes can reduce image quality
-and performance, do not cap every D3D12 allocation, and do not guarantee
-correct rendering or playable performance.
+local mesh-scratch cap, a 128 MiB idle shared-scratch reuse cache,
+and a 70% local-memory threshold for optional UAV optimizations. Shared
+scratch chunks are recycled across host lists after their submissions finish;
+chunks beyond the cache limit are released instead of being retained by
+hundreds of otherwise idle lists. Active per-submission scratch can still
+exceed that cache limit. New scratch beyond the local cap uses CPU-visible
+shared memory, which is slower but preserves the required scratch path.
+Explicit environment overrides are preserved. These changes can reduce
+image quality and performance, do not cap every D3D12 allocation, and do
+not guarantee correct rendering or playable performance.
 
 See [docs/local-uav-memory-headroom.md](docs/local-uav-memory-headroom.md)
 for the stricter profile and its allocation limits.
