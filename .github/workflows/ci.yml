@@ -74,7 +74,8 @@ jobs:
             "Win32_VideoController",
             "agility_sdk_expected",
             "exit_code=",
-            'VICTORY_D3D12_DEBUG = "1"'
+            'VICTORY_D3D12_DEBUG = "1"',
+            'VICTORY_D3D12_DRED = "1"'
           )) {
             if ($launcher -notmatch [regex]::Escape($required)) {
               throw "Launcher diagnostic report is missing required field or behavior: $required"
