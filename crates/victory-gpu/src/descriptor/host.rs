@@ -1995,8 +1995,10 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 }
                 let mut desc=desc.as_ref().map(srv_desc);
                 if !fits(texture,desc.as_mut().map(|d|&mut d.Format),false){return None;}
-                if let (Some(copy),Some(desc))=(crate::resource::host_copy(resource),desc.as_mut()){
-                    if copy.mip_drop>0{adjust_srv_for_dropped_mips(desc,u32::from(copy.mip_drop),copy.host_mips());}
+                if let (Some(copy),Some(desc))=(crate::resource::host_copy(resource),desc.as_mut())
+                    && copy.mip_drop>0
+                {
+                    adjust_srv_for_dropped_mips(desc,u32::from(copy.mip_drop),copy.host_mips());
                 }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
