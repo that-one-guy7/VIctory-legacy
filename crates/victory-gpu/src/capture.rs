@@ -411,7 +411,10 @@ fn dump_one(
         (read, stencil)
     };
     let (read, stencil) = read;
-    list.close();
+    if let Err(error) = list.close() {
+        tracing::warn!(error = %error, frame, resource = ?resource, "skipping capture for a rejected command list");
+        return;
+    }
     host.execute(&[&list]);
     if let Some((buffer, footprint)) = stencil {
         stencil_values(&buffer, &footprint, frame, resource);
