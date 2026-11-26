@@ -1408,8 +1408,6 @@ pub(crate) fn host_waits(this: This) -> bool {
     let r = resource(this);
     r.desc.dimension != BUFFER
         && !r.host.refused.load(std::sync::atomic::Ordering::Relaxed)
-        // Keep slots waiting while the copy is deferred: texture_made
-        // must remirror them when VRAM headroom returns.
         && r.host.made.lock().unwrap_or_else(|e| e.into_inner()).is_none()
 }
 
@@ -1425,12 +1423,6 @@ fn hosted(this: This, make: bool) -> Option<Made> {
     let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
     if made.is_none() {
         if !make || r.host.refused.load(Relaxed) {
-            return None;
-        }
-        // These sampled copies can be recreated from title memory. Keep
-        // them below the local-memory budget; render targets, depth and UAV
-        // textures are not gated because their contents are host-only.
-        if fills(&r.desc) && !texture_room() {
             return None;
         }
         let clear = r
@@ -1558,23 +1550,6 @@ pub(crate) fn room() -> bool {
     if filled < FLOOR { return true; }
     filled < WITHOUT_BUDGET
 }
-
-/// Whether another title-filled texture copy may be made. The memory
-/// budget is sampled by DXGI; refuse only new reconstructible copies and
-/// leave existing resources and host-written render targets untouched.
-#[cfg(windows)]
-fn texture_room() -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    let room = self::room();
-    if !room && !WARNED.swap(true, Relaxed) {
-        tracing::warn!(
-            "deferring new title-filled host texture copies near the local GPU memory budget"
-        );
-    }
-    room
-}
-
 /// Lets go of the host copies of textures the title fills that nothing
 /// names any more: placed textures were never released (one host texture
 /// per address and description ever viewed: 18,639 of them, 2.5 GB, after
