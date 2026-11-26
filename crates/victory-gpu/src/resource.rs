@@ -2926,7 +2926,7 @@ mod tests {
                 None,
             );
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copy finished (execute waits); the buffer is 1024 bytes.
@@ -3097,7 +3097,7 @@ mod tests {
                 moved(host_depth, source, tested),
             ]);
         }
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copies finished (execute waits); the buffer is 1024 bytes.
@@ -3260,7 +3260,7 @@ mod tests {
             l.CopyTextureRegion(&whole(twin, 0), 0, 0, 0, &rows(&upload, pattern_rows), None);
             l.ResourceBarrier(&[moved(twin, dest, written)]);
         }
-        fill.close();
+        fill.close().unwrap();
         host.execute(&[&fill]);
 
         // A list in which a shader writes the twin: closing it copies the
@@ -3268,7 +3268,7 @@ mod tests {
         let list = host.new_list().unwrap();
         assert!(list.twin_use(depth, true, true));
         list.twins_written();
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
 
         // The stencil plane read back from the state the list left it in.
@@ -3283,7 +3283,7 @@ mod tests {
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
             l.ResourceBarrier(&[moved(host_depth, source, state)]);
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copies finished (execute waits); the buffer is 4096 bytes.
@@ -3487,7 +3487,7 @@ mod tests {
             l.CopyTextureRegion(&whole(plane), 0, 0, 0, &rows(&upload, rows_of(53)), None);
             l.ResourceBarrier(&[moved(plane, dest, written)]);
         }
-        fill.close();
+        fill.close().unwrap();
         host.execute(&[&fill]);
 
         // A list in which a shader writes the twins: closing it draws the
@@ -3495,7 +3495,7 @@ mod tests {
         let list = host.new_list().unwrap();
         assert!(list.twin_use(depth, true, true));
         list.twins_written();
-        list.close();
+        list.close().unwrap();
         host.execute(&[&list]);
 
         // The draws: a triangle over the target at the depth of a class,
@@ -3603,7 +3603,7 @@ float4 lit() : SV_Target { return 1.0; }
             let (to, from) = (rows(&readback, rows_of(61)), whole(&target));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
         }
-        back.close();
+        back.close().unwrap();
         host.execute(&[&back]);
         let mut mapped = std::ptr::null_mut();
         // SAFETY: the copy finished (execute waits); the buffer is 1024 bytes.
