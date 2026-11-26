@@ -6366,6 +6366,22 @@ impl Host {
     /// A device-local buffer shaders may write (unordered access) and indirect
     /// execution may read, starting in the common state.
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        // Texture copies have their own budget gate, but mesh scratch, card
+        // shadows, twins and indirect buffers all arrive here. Keep this
+        // allocation path from consuming the adapter's last 15% of local
+        // memory. DXGI usage is process-wide and includes these resources;
+        // this is deliberately a headroom guard, not a global hard quota.
+        if let Some([budget, used, ..]) = self.video_memory()
+            && !local_uav_budget_allows(budget, used, size)
+        {
+            tracing::warn!(
+                budget_mb = budget / (1 << 20),
+                used_mb = used / (1 << 20),
+                request_mb = size.div_ceil(1 << 20),
+                "skipping device-local UAV buffer near the adapter memory budget"
+            );
+            return None;
+        }
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -6406,6 +6422,16 @@ impl Host {
             }
         }
     }
+}
+
+/// Leaves 15% of the reported local-memory budget available for the
+/// driver, swap chain and allocations outside this wrapper's UAV path.
+fn local_uav_budget_allows(budget: u64, used: u64, request: u64) -> bool {
+    if budget == 0 {
+        return true;
+    }
+    let limit = (budget / 100) * 85 + (budget % 100) * 85 / 100;
+    used < limit && request <= limit - used
 }
 
 /// For adapters without device-removed data (the software one): the last
@@ -6692,5 +6718,32 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
             SIZE >> 20,
             before.as_secs_f64() / after.as_secs_f64()
         );
+    }
+}
+
+
+#[cfg(test)]
+mod local_uav_budget {
+    use super::local_uav_budget_allows;
+
+    #[test]
+    fn leaves_fifteen_percent_for_driver_and_other_allocations() {
+        let budget = 4 * (1 << 30);
+        let limit = budget / 100 * 85;
+        assert!(local_uav_budget_allows(budget, limit - (64 << 20), 64 << 20));
+        assert!(!local_uav_budget_allows(budget, limit, 1));
+        assert!(!local_uav_budget_allows(budget, limit - (64 << 20), (64 << 20) + 1));
+    }
+
+    #[test]
+    fn respects_small_budgets_and_current_usage() {
+        assert!(local_uav_budget_allows(100, 0, 85));
+        assert!(!local_uav_budget_allows(100, 80, 6));
+        assert!(!local_uav_budget_allows(100, 86, 0));
+    }
+
+    #[test]
+    fn unavailable_budget_does_not_block_allocations() {
+        assert!(local_uav_budget_allows(0, u64::MAX, u64::MAX));
     }
 }
