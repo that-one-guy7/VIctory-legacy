@@ -1430,7 +1430,7 @@ fn take_mesh_shared_spare(size: u64) -> Option<MeshChunk> {
 }
 
 /// Returns a completed shared scratch chunk to the bounded cache, evicting
-/// older cached chunks first. Dropped chunks release their system RAM.
+/// cached chunks as needed. Dropped chunks release their system RAM.
 fn give_mesh_shared_spare(mut chunk: MeshChunk) {
     if chunk.local || !chunk.touched {
         return;
