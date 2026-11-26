@@ -562,6 +562,30 @@ impl State {
                 dsv.as_ref().map(std::ptr::from_ref),
             )
         };
+        // A title may set viewports/scissors before changing its targets.
+        // Reapply them after target binding so they use the new target scale.
+        if !self.viewports.is_empty() {
+            let viewports = self.viewports.clone();
+            self.set_viewports(list, &viewports);
+        }
+        if !self.scissors.is_empty() {
+            let scissors = self.scissors.clone();
+            self.set_scissors(list, &scissors);
+        }
+    }
+
+    /// The scale shared by the currently bound render/depth targets.
+    fn render_scale(&self) -> (f32, f32) {
+        let candidates = self.targets.iter().copied().chain(
+            (self.depth != 0).then_some(self.depth),
+        );
+        for resource in candidates {
+            let scale = crate::resource::host_render_scale(resource as This);
+            if scale.0 < 0.9999 || scale.1 < 0.9999 {
+                return scale;
+            }
+        }
+        (1.0, 1.0)
     }
 
     /// Viewports, scissors, the blend factor and the stencil reference: set
@@ -569,26 +593,46 @@ impl State {
     pub(crate) fn set_viewports(&mut self, list: &HostList, viewports: &[D3D12_VIEWPORT]) {
         self.viewports.clear();
         self.viewports.extend_from_slice(viewports);
-        crate::draw::viewports(list, viewports);
+        let (sx, sy) = self.render_scale();
+        if sx >= 0.9999 && sy >= 0.9999 {
+            crate::draw::viewports(list, viewports);
+            return;
+        }
+        let scaled: Vec<_> = viewports
+            .iter()
+            .map(|viewport| D3D12_VIEWPORT {
+                TopLeftX: viewport.TopLeftX * sx,
+                TopLeftY: viewport.TopLeftY * sy,
+                Width: viewport.Width * sx,
+                Height: viewport.Height * sy,
+                MinDepth: viewport.MinDepth,
+                MaxDepth: viewport.MaxDepth,
+            })
+            .collect();
+        crate::draw::viewports(list, &scaled);
     }
 
     pub(crate) fn set_scissors(&mut self, list: &HostList, rects: &[RECT]) {
         self.scissors.clear();
         self.scissors.extend_from_slice(rects);
-        if scissor_test() {
-            // The experiment: every rectangle the title sets is widened to
-            // the largest target there is, so nothing is cut by one. What
-            // the listing shows (`op_text`) stays the title's own.
+        let original = if scissor_test() {
             let full = RECT {
                 left: 0,
                 top: 0,
                 right: 16384,
                 bottom: 16384,
             };
-            crate::draw::scissors(list, &vec![full; rects.len()]);
-            return;
+            vec![full; rects.len()]
+        } else {
+            rects.to_vec()
+        };
+        let (sx, sy) = self.render_scale();
+        if sx < 0.9999 || sy < 0.9999 {
+            let scaled = crate::draw::scale_rectangles(&original, sx, sy);
+            crate::draw::scissors(list, &scaled);
+        } else {
+            crate::draw::scissors(list, &original);
         }
-        crate::draw::scissors(list, rects);
     }
 
     pub(crate) fn set_blend_factor(&mut self, list: &HostList, factor: Option<&[f32; 4]>) {
@@ -625,7 +669,8 @@ impl State {
             self.set_targets(list, &handles, self.depth_handle);
         }
         if !self.viewports.is_empty() {
-            crate::draw::viewports(list, &self.viewports);
+            let viewports = self.viewports.clone();
+            self.set_viewports(list, &viewports);
         }
         if !self.scissors.is_empty() {
             let rects = std::mem::take(&mut self.scissors);
@@ -3052,6 +3097,22 @@ pub(crate) fn scissors(list: &HostList, rects: &[RECT]) {
     unsafe { list.list.RSSetScissorRects(rects) };
 }
 
+/// Scales scissor and clear rectangles into a reduced host render target.
+/// Outward rounding keeps every touched destination pixel covered.
+pub(crate) fn scale_rectangles(rects: &[RECT], sx: f32, sy: f32) -> Vec<RECT> {
+    let coordinate = |value: i32, scale: f32, upper: bool| {
+        let scaled = f64::from(value) * f64::from(scale);
+        let rounded = if upper { scaled.ceil() } else { scaled.floor() };
+        rounded.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    };
+    rects.iter().map(|rect| RECT {
+        left: coordinate(rect.left, sx, false),
+        top: coordinate(rect.top, sy, false),
+        right: coordinate(rect.right, sx, true),
+        bottom: coordinate(rect.bottom, sy, true),
+    }).collect()
+}
+
 pub(crate) fn blend_factor(list: &HostList, factor: Option<&[f32; 4]>) {
     // SAFETY: an open list.
     unsafe { list.list.OMSetBlendFactor(factor) };
@@ -3062,4 +3123,27 @@ pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
     crate::capture::op(std::ptr::from_ref(list) as usize, || format!("STENCIL REF {reference:#x}"));
     // SAFETY: an open list.
     unsafe { list.list.OMSetStencilRef(reference) };
+}
+
+#[cfg(test)]
+mod render_scale_tests {
+    use super::*;
+
+    #[test]
+    fn render_scale_rectangles_round_outward() {
+        let input = [RECT { left: 1, top: 3, right: 101, bottom: 203 }];
+        let scaled = scale_rectangles(&input, 0.5, 0.25);
+        assert_eq!(scaled[0].left, 0);
+        assert_eq!(scaled[0].top, 0);
+        assert_eq!(scaled[0].right, 51);
+        assert_eq!(scaled[0].bottom, 51);
+    }
+
+    #[test]
+    fn render_scale_rectangles_preserve_native_dimensions() {
+        let input = [RECT { left: 0, top: 0, right: 1280, bottom: 720 }];
+        let scaled = scale_rectangles(&input, 1.0, 1.0);
+        assert_eq!(scaled[0].right, 1280);
+        assert_eq!(scaled[0].bottom, 720);
+    }
 }
