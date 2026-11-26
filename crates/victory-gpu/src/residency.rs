@@ -160,7 +160,7 @@ pub(crate) fn allow_texture_staging(bytes: u64) -> bool {
 /// The existing reference-count and command-list ownership checks remain intact.
 fn pressure_idle_timeout_ms(pressured: bool, normal: u64) -> u64 {
     if pressured {
-        normal.min(5_000)
+        normal.min(2_500)
     } else {
         normal
     }
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn pressure_shortens_only_idle_retention() {
         assert_eq!(10_000, pressure_idle_timeout_ms(false, 10_000));
-        assert_eq!(5_000, pressure_idle_timeout_ms(true, 10_000));
+        assert_eq!(2_500, pressure_idle_timeout_ms(true, 10_000));
         assert_eq!(2, pressure_idle_timeout_frames(true, 4));
         assert_eq!(4, pressure_idle_timeout_frames(false, 4));
     }
