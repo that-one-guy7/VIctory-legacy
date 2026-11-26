@@ -29,8 +29,9 @@ jobs:
       - name: Clippy, diagnostics build
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       # Includes xtask's repository_passes_policy, the asset-policy check.
+      # D3D12/WARP tests share GPU state; parallel test threads can cause driver access violations.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
       # Exercise the real pinned NuGet download, SHA-512 check, extraction,
       # app-local layout, and executable exports on the Windows runner.
       - name: Stage D3D12 Agility SDK
