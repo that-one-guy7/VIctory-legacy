@@ -740,6 +740,9 @@ mod tests {
 pub(crate) struct HostList {
     allocator: ID3D12CommandAllocator,
     pub(crate) list: ID3D12GraphicsCommandList,
+    /// Non-zero HRESULT when D3D12 rejected this list at Close. Such a list
+    /// must never be passed to ExecuteCommandLists.
+    close_error: std::sync::atomic::AtomicI32,
     /// Work for submission time, in recorded order.
     deferred: Mutex<Deferred>,
     /// Upload memory for data the list's draws make (expanded vertices),
@@ -3174,6 +3177,7 @@ impl Host {
             Ok(HostList {
                 allocator,
                 list,
+                close_error: std::sync::atomic::AtomicI32::new(0),
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 mesh_scratch: Mutex::default(),
@@ -4201,7 +4205,18 @@ impl Host {
     /// [`Host::execute_late`]: the lists are prepared and sent, and what is
     /// to be done once they have run comes back with the submission lock
     /// still held.
-    fn submit<'a>(&'a self, runs: &[&HostList], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+    fn submit<'a>(&'a self, input_runs: &[&HostList], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+        let runs: Vec<&HostList> = input_runs.iter().copied().filter(|run| !run.close_failed()).collect();
+        if runs.len() != input_runs.len() {
+            tracing::error!(
+                skipped = input_runs.len() - runs.len(),
+                total = input_runs.len(),
+                "omitting D3D12 command lists whose Close call failed"
+            );
+        }
+        if runs.is_empty() {
+            return None;
+        }
         #[cfg(feature = "diagnostics")]
         let called = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -4770,7 +4785,7 @@ impl HostList {
         times
     }
 
-    pub(crate) fn close(&self) {
+    pub(crate) fn close(&self) -> windows::core::Result<()> {
         self.twins_to_depth();
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
@@ -4781,12 +4796,22 @@ impl HostList {
                 self.list.ResolveQueryData(heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, count + 1, back, 0);
             }
         }
-        // SAFETY: our list.
-        if let Err(e) = unsafe { self.list.Close() } {
-            fail(format_args!(
-                "a host command list did not close ({e}): a command recorded into it was invalid"
-            ));
+        // SAFETY: our list. A failed Close is returned to the title and the
+        // list is excluded from GPU submission rather than panicking here.
+        if let Err(error) = unsafe { self.list.Close() } {
+            self.close_error.store(error.code().0, Ordering::Release);
+            crate::residency::allocation_error(&error);
+            tracing::error!(
+                hresult = %error.code(),
+                "D3D12 rejected a host command list at Close; it will be skipped"
+            );
+            return Err(error);
         }
+        Ok(())
+    }
+
+    fn close_failed(&self) -> bool {
+        self.close_error.load(Ordering::Acquire) != 0
     }
 
     /// Only after the list's last submission finished (every one is waited
@@ -4820,6 +4845,7 @@ impl HostList {
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
         }
+        self.close_error.store(0, Ordering::Release);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
     }
