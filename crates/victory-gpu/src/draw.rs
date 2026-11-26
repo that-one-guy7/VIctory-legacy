@@ -562,6 +562,16 @@ impl State {
                 dsv.as_ref().map(std::ptr::from_ref),
             )
         };
+        // A title may set viewports/scissors before changing its targets.
+        // Reapply them after target binding so they use the new target scale.
+        if !self.viewports.is_empty() {
+            let viewports = self.viewports.clone();
+            self.set_viewports(list, &viewports);
+        }
+        if !self.scissors.is_empty() {
+            let scissors = self.scissors.clone();
+            self.set_scissors(list, &scissors);
+        }
     }
 
     /// The scale shared by the currently bound render/depth targets.
