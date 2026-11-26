@@ -1,6 +1,36 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45728150342](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45728150342) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `1e3bdcf`. Physical-GPU/image-equivalence validation remains outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45728677789](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45728677789) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `5fc2c42`. A later runtime log exposed a mesh-compute root-signature bug and GPU allocation pressure; the targeted fixes below are being validated in CI. Physical-GPU/image-equivalence validation remains outstanding.**
+
+## Follow-up from the GTX 1050 Ti runtime log
+
+The 2026-11-26 diagnostic run reached the 1280x720 title path, but D3D12
+rejected many mesh-fallback compute PSOs with
+`0x80070057`. The debug InfoQueue identified the exact mismatch: translated
+mesh-compute shaders requested root SRVs in register space 9, while bounded
+descriptor-table ranges were still declared in register space 1. The root
+descriptors, user data and samplers already applied the mesh-compute shift;
+the table-range path did not. The range builder now applies the same
+`ROOT_CBV_SPACE + shift` rule, with a unit test for ordinary and shifted SRV
+and UAV ranges.
+
+The same run also reported a 32 MiB unordered-access buffer allocation failure
+(`0x8007000E`) after GPU memory use had climbed substantially. A first-chance
+access violation was then reported inside the D3D12 debug-layer DLL while the
+title was reporting its crash; the log does not prove that this exception was
+the original cause of the title failure. For the fallback launcher profile,
+large title-buffer copies are now kept in CPU-visible memory by default
+(`VICTORY_CARD_BUFFERS=0`), avoiding those additional GPU-local copies that
+compete with texture resources and mesh scratch. An explicit user setting
+still overrides this fallback default. This favors stability over the faster
+GPU-local buffer-copy path and may reduce performance.
+
+The next physical run should use the diagnostics build with the D3D12 debug
+layer disabled: the InfoQueue mismatch is now addressed in code, while leaving
+the validation layer enabled added substantial overhead and was present in
+the final crash stack. GPU-based validation remains off. CI passing will
+validate compilation and tests, not guarantee that the runtime no longer
+crashes.
 
 ## Why this work is needed
 
