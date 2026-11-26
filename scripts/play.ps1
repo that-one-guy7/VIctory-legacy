@@ -108,7 +108,14 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    Write-Host "Low-VRAM mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    # In diagnostics builds, probe whether this driver's D3D12 runtime can
+    # open eligible title-owned memory directly. This is read-only diagnostic
+    # work; it does not enable VICTORY_INPLACE or change rendering behavior.
+    if ($ProfileName -eq "diag" -and
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_INPLACE_PROBE", "Process"))) {
+        $env:VICTORY_INPLACE_PROBE = "2"
+    }
+    Write-Host "Low-VRAM mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS; in-place memory probe=$env:VICTORY_INPLACE_PROBE." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache

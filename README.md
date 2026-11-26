@@ -119,34 +119,61 @@ details, limitations, validation status, and the next acceptance gates. The
 is a useful reference but is a separate, newer code line and is not merged
 wholesale into this repository.
 
-### Latest GTX 1050 Ti diagnostic (2026-11-26)
+### Latest GTX 1050 Ti diagnostic (2026-11-26, follow-up run)
 
-The uploaded `ztrx.log` reached frame 2341, then lost the D3D12 device.
-This run had the requested low-VRAM settings active, including
-`VICTORY_CARD_BUFFERS=0` and `VICTORY_RENDER_SCALE=1.0`. The launcher
-reported about 12 GB of free physical RAM at startup, so the evidence points
-to GPU-local allocation pressure rather than an already-exhausted page file.
+The follow-up run no longer logged the mixed-render-target-scale CopyResource
+skip, so the small scaled-target rectangle from the previous run is addressed.
+The 3D transition is still not rendering reliably: the queue logged 36 black
+frames, and the title's descriptor heap request (1,245,184 views) exceeded the
+NVIDIA host heap limit used here (1,000,000). Views beyond that cap are mapped
+to a null descriptor; this is a concrete rendering limitation, although the log
+does not prove that every black frame came from an out-of-range descriptor.
 
-The decisive memory samples showed 6,612 MB of local GPU usage against a
-3,403 MB DXGI budget, plus 4,707 MB of shared GPU memory in use. The wrapper
-had about 2,349 MB of host textures alive. The separate "made so far" counter
-listed 570 device-local UAV/card-buffer allocations totalling 4,068 MB since
-startup; that is cumulative allocation history, **not** a live-bytes figure,
-and it does not identify every allocation as mesh scratch. Repeated 32 MiB
-UAV and 1 MiB shared-buffer allocations then failed with `0x8007000E`;
-black frames followed, then the device was removed (`0x887A0005`). The last reported
-`0x887A0004` is a post-removal device reason, not proof that one specific
-unsupported feature caused the initial failure.
+The shader translator also refused several programs, and their draws were
+dropped: one compute shader uses v_permlanex16_b32; another uses a lane-mask
+exchange outside a whole-wave execution region; one compute shader reads a
+descriptor's address/format as data; and two pixel shaders read descriptors
+only as data. The log additionally shows a large pipeline backlog. These are
+separate correctness/coverage gaps; they are not fixed by lowering the VRAM
+budget. The ray-tracing structure builder remains disabled.
 
-`VICTORY_CARD_BUFFERS=0` disables optional copies of title buffers; it does
-not disable required mesh-fallback scratch or all other device-local buffers.
-The crash fix therefore bounds mesh scratch across *all* host command lists,
-not merely inside each list, and moves new scratch allocations to CPU-visible
-shared memory when local VRAM is too full. Shared-memory fallback may reduce
-GPU performance, but it avoids continuing to grow default-heap scratch pools
-past the adapter's budget. This is a targeted mitigation, not a global D3D12
-memory cap; textures, render targets and other resource classes remain
-separately allocated.
+The final memory sample is materially different from the earlier device-removed
+run:
+
+- DXGI local GPU usage: about **3,553 MiB** against a **3,403 MiB** budget.
+- GPU-shared non-local memory in use: about **6,789 MiB**.
+- Physical RAM free: about **1,125 MiB**; process private bytes: about
+  **17,896 MiB**.
+- Commit headroom: about **44,177 MiB**. This is page-file/commit headroom, not
+  physical RAM available to an active GPU allocation.
+- Host copies of title memory: about **5,272 MiB**, including about
+  **4,284 MiB** of windows outside title buffers.
+- Host textures: about **2,994 MiB**, of which about **2,579 MiB** were
+  host render/write textures.
+- Mesh scratch was substantially smaller than those two pools and was not the
+  dominant source of retained memory in this run.
+
+The last failure was ID3D12GraphicsCommandList::Close returning
+0x8007000E ("not enough memory resources"), followed by exit code
+-2005270523. It did not end with the device-removed code from the previous
+run. The error text says a recorded command was invalid; a separate
+VICTORY_D3D12_DEBUG=1 run is needed to identify which command. CPU-side
+refresh/copy work was also heavy: sampled frames spent around 0.3–1 second per
+frame and checked multiple GiB of title-memory ranges. This is consistent with
+the CPU saturation and low free-RAM reading in Task Manager.
+
+The count of 278 host lists that had never been reset is not, by itself, proof
+of a resource leak: the code's counter includes title-created host lists that
+have not been used/reset. They must not be forcibly reset while the title may
+still use them.
+
+For the next diagnostics build, the low-VRAM launcher now sets
+VICTORY_INPLACE_PROBE=2 by default (unless explicitly overridden). The
+probe tests whether this driver can expose eligible title-owned private memory
+directly to D3D12, and records memory eligibility/census results at 30 and 150
+seconds. It does not enable VICTORY_INPLACE; that option pins title-owned
+pages and can change memory lifetime, so it should only be enabled after the
+probe shows that the driver supports it and enough memory is eligible.
 
 ### Compatibility-layer research
 
