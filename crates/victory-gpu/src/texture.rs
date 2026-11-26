@@ -30,6 +30,25 @@ macro_rules! once {
     }};
 }
 
+/// Number of top texture mip levels to omit (VICTORY_TEXTURE_MIP_DROP=0..=3).
+/// Disabled by default; opt in per run.
+pub(crate) fn texture_mip_drop()->u32{
+    static DROP:std::sync::OnceLock<u32>=std::sync::OnceLock::new();
+    *DROP.get_or_init(||{
+        let value=std::env::var("VICTORY_TEXTURE_MIP_DROP").ok()
+            .and_then(|v|v.trim().parse::<u32>().ok()).unwrap_or(0).min(3);
+        if value>0{tracing::info!(mip_drop=value,"texture mip dropping enabled");}
+        value
+    })
+}
+
+/// Minimum width and height for a texture to qualify (default 1024).
+pub(crate) fn texture_mip_drop_min_size()->u64{
+    static SIZE:std::sync::OnceLock<u64>=std::sync::OnceLock::new();
+    *SIZE.get_or_init(||std::env::var("VICTORY_TEXTURE_MIP_DROP_MIN_SIZE").ok()
+        .and_then(|v|v.trim().parse::<u64>().ok()).filter(|&v|v>0).unwrap_or(1024))
+}
+
 /// A texture's upload state: the staging buffer laid out as the host
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
@@ -41,8 +60,10 @@ pub(crate) struct Staging {
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
-    /// Mips per array slice.
-    mips: u32,
+    /// Mips per array slice in the host texture.
+    mips:u32,
+    /// Top console mip levels omitted from the host texture.
+    mip_drop:u32,
     /// The staging buffer's bytes (counted in `STAGED` while it lives).
     bytes: u64,
     memory: *const u8,
@@ -450,7 +471,9 @@ pub(crate) fn let_go_idle() {
 
 /// Textures the host GPU wrote by a copy or resolve: their contents are on
 /// the host, not in title memory, which stays as it was.
-static HOST_WRITTEN: Mutex<Option<std::collections::HashSet<usize>>> = Mutex::new(None);
+static HOST_WRITTEN:Mutex<Option<std::collections::HashSet<usize>>>=Mutex::new(None);
+/// Host-written subresources of partially copied mip-dropped textures.
+static HOST_WRITTEN_SUBRESOURCES:Mutex<Option<HashMap<usize,std::collections::HashSet<u32>>>>=Mutex::new(None);
 
 /// A host copy or resolve writes `resource`.
 pub(crate) fn host_written(resource: This) {
@@ -463,11 +486,25 @@ pub(crate) fn host_written(resource: This) {
 /// ([`host_written`]): its host copy cannot be made again from title
 /// memory.
 pub(crate) fn host_wrote(resource: usize) -> bool {
-    HOST_WRITTEN
+    if HOST_WRITTEN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .is_some_and(|set| set.contains(&resource))
+    {
+        return true;
+    }
+    HOST_WRITTEN_SUBRESOURCES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|map| map.contains_key(&resource))
+}
+
+
+pub(crate) fn host_written_subresource(resource:This,subresource:u32){
+    let mut map=HOST_WRITTEN_SUBRESOURCES.lock().unwrap_or_else(|e|e.into_inner());
+    map.get_or_insert_with(Default::default).entry(resource as usize).or_default().insert(subresource);
 }
 
 /// The title released a resource.
@@ -480,6 +517,8 @@ pub(crate) fn forget(resource: usize) {
     if let Some(set) = set.as_mut() {
         set.remove(&resource);
     }
+    let mut partial=HOST_WRITTEN_SUBRESOURCES.lock().unwrap_or_else(|e|e.into_inner());
+    if let Some(partial)=partial.as_mut(){partial.remove(&resource);}
     let mut through = THROUGH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(through) = through.as_mut() {
         through.remove(&resource);
@@ -509,9 +548,9 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     if host_written || !list.first_use(resource as usize) {
         return;
     }
-    let Some(staging) = staging(resource, texture) else {
-        return;
-    };
+    let Some(staging)=staging(resource,texture) else{return;};
+    let partly_written=HOST_WRITTEN_SUBRESOURCES.lock().unwrap_or_else(|e|e.into_inner())
+        .as_ref().and_then(|map|map.get(&(resource as usize))).cloned().unwrap_or_default();
     use std::sync::atomic::Ordering::Relaxed;
     staging.used.store(crate::host::moment(), Relaxed);
     // The host texture has the staging buffer's contents: only the check
@@ -530,8 +569,9 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     crate::list::ensure_state(list, resource, COPY_DEST);
     // The staging buffer lives as long as `staging`, which the deferred
     // refresh below holds until the list is reset.
-    for (i, footprint) in staging.footprints.iter().enumerate() {
-        #[cfg(feature = "diagnostics")]
+    for (i,footprint) in staging.footprints.iter().enumerate(){
+        if partly_written.contains(&(i as u32)){continue;}
+        #[cfg(feature="diagnostics")]
         {
             let f = footprint.Footprint;
             // SAFETY: live resources.
@@ -782,7 +822,8 @@ impl Staging {
             );
         }
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
-            let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
+            let (host_mip,slice)=(i as u32%self.mips,i as u32/self.mips);
+            let mip=host_mip+self.mip_drop;
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
             let len = pitch * rows as usize * f.Depth as usize;
@@ -983,8 +1024,10 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
 
 /// The staging state of a title texture, made on first use.
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
-    let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    let map = map.get_or_insert_with(HashMap::new);
+    // Get mip metadata before STAGING's lock to preserve resource -> staging lock order.
+    let mip_drop=u32::from(crate::resource::host_copy(resource)?.mip_drop);
+    let mut map=STAGING.lock().unwrap_or_else(|e|e.into_inner());
+    let map=map.get_or_insert_with(HashMap::new);
     if let Some(s) = map.get(&(resource as usize)) {
         return Some(s.clone());
     }
@@ -1043,8 +1086,9 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         footprints,
         rows,
         layout,
-        mips: u32::from(d.MipLevels),
-        bytes: total,
+        mips:u32::from(d.MipLevels),
+        mip_drop,
+        bytes:total,
         memory,
         last: Mutex::default(),
         dirty: std::sync::atomic::AtomicBool::new(true),
