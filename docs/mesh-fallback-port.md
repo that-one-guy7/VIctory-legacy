@@ -498,3 +498,127 @@ Do not port the reference's entire descriptor or indirect implementation as
 a single change. Its code is from a different source snapshot and assumes
 native mesh shaders on RDNA3. Compare individual resource-lifetime invariants
 and synthetic tests against this branch before adapting anything.
+
+
+## Latest GTX 1050 Ti diagnostic (2026-11-26; `ztrx(10).log`)
+
+The test used the diagnostic executable through `scripts/play.ps1 -Exe ... -Game ...`.
+The loader mapped all title images and bound all imports (0 missing), the host
+D3D12 device started, the title was told to render at 1280x720, and four
+pipeline-compilation workers started. The run still did **not** reach a
+visibly rendered 3D scene.
+
+The ending is different from the previous log: at frame 2294 the host could
+not create a command-list prelude and reported `0x8007000E`
+(`E_OUTOFMEMORY`). The old message combined three possible failure points:
+`CreateCommandAllocator`, `CreateCommandList`, and `Close`; the launcher
+and host now log the effective environment and exact failing prelude stage
+so the next trace can distinguish them.
+
+The last detailed memory sample, at 01:07:08 UTC, reported:
+
+- 18,029 MB private process memory; 10,095 MB resident; only 446 MB free
+  physical system memory and 3,914 MB remaining commit.
+- 4,304 host copies of title memory alive (3,839 MB), including 2,852 MB in
+  windows outside buffers; 1,299 host textures alive (2,720 MB).
+- 522 card buffers (3,129 MB). The WDDM accounting line reported 6,081 MB
+  card use against a 3,403 MB budget, including 4,547 MB of PC memory shared
+  with the card. This is not a claim that all 6,081 MB is dedicated VRAM.
+- 660 host lists alive and 83 scratch chunks (51 MB).
+
+The CPU/GPU timing points to a second bottleneck: one sampled frame measured
+1,052.8 ms of work with the card about 21% busy, and 937.6 ms elapsed while
+the submitting thread was working. Another measured 554.3 ms with the card
+about 39% busy and 512.8 ms of submitting-thread work. The layer was not
+feeding the GPU quickly enough in those samples. Title-buffer snapshot/copy
+accounting was also very high (roughly 0.6–0.8 GB per sampled frame).
+
+**Important profile correction:** the launcher defaults
+`VICTORY_CARD_BUFFERS=0` only when that variable is not already set. The
+`ztrx(10).log` memory counters nevertheless show 522 card buffers alive.
+That means the low-VRAM default was not in effect for the whole run, or the
+counter path needs further investigation; the log alone cannot tell which.
+The launcher now writes its resolved environment values into `ztrx.log`,
+rather than relying on a separate console message. Explicit environment
+overrides are still preserved.
+
+The earlier 32 MiB UAV-allocation failure from `ztrx(9).log` should not be
+confused with this run's prelude failure. The latter occurs while making a
+D3D12 command allocator/list and currently has a separate stage-specific
+diagnostic.
+
+### The two unimplemented device methods
+
+This run also reports device vtable slots `0x1c8` and `0x218`. Upstream
+VIctory issue [#417](https://github.com/Marvisak/VIctory/issues/417) reports
+the same warnings on the same title build. Upstream PR
+[#518](https://github.com/Marvisak/VIctory/pull/518) tried returning
+`S_OK`, but a hardware test then crashed when title worker threads consumed
+unwritten output pointers. The PR was closed; the maintainer discussion says
+to retain the failing `E_NOTIMPL` behavior until the real method contracts
+are known. These slots are still implementation work, but **returning fake
+success is not a valid fix**. They are also not proven to be the cause of this
+run's world-entry failure: issue #417 reached the start screen with the same
+warnings.
+
+## External compatibility-layer comparison (PortWatch review, 2026-11-26)
+
+PortWatch's tracker was refreshed on 2026-11-25. Its own methodology says
+self-reported claims are labelled; it scores separate boot, rendering,
+performance and stability milestones. Treat project cards as useful leads,
+not independently reproduced benchmarks:
+[PortWatch tracker and methodology](https://portwatch-vi.xyz/).
+
+The most relevant references are:
+
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** is the
+  closest NVIDIA comparison because it builds on VIctory and targets NVIDIA.
+  Its current README reports 8–10 FPS in the first rooms on an RTX 4070 12 GB,
+  i7-14700KF and 32 GB RAM; its measured profile started at 3–6 seconds per
+  frame. Moving selected small title buffers into GPU memory improved a
+  measured frame from 114.9 to 109.7 ms, but the README says the submitting
+  CPU thread remained the limit. Its tests also show the memory trade-off:
+  card-local copies can reduce CPU/bus work but compete with textures and
+  consume a large share of the card budget. This is a useful optimization
+  reference, not a drop-in patch for a 4 GB GTX 1050 Ti.
+  [README measurements](https://github.com/fxceless/victory-fork#readme).
+
+- **[XCL](https://github.com/xcl-dev/xcl)** has a different, Wine-style
+  architecture. It compiles the game's RDNA2 shaders into HLSL/DXIL, uses
+  background/non-blocking pipeline creation with a stand-in while a missing
+  pipeline is built, and documents 26,698 translated shader programs. Its
+  current PortWatch entry still describes world loading stuck on a spinner
+  and a GPU watchdog, with incomplete BCPack texture support. The pipeline
+  strategy is worth studying; its current GTA VI result is not a solved
+  rendering path.
+  [XCL graphics design](https://github.com/xcl-dev/xcl#how-it-works) ·
+  [PortWatch XCL assessment](https://portwatch-vi.xyz/data/tracker.json).
+
+- **[Belobug's AMD VIctory fork](https://github.com/Belobug/VIctory-Belobug-AMD)**
+  is the strongest PortWatch visual result, but it is an AMD-only comparison:
+  PortWatch reports 3–5 FPS on an RX 9070 XT 16 GB with a Ryzen 7 9800X3D
+  and 64 GB RAM, and says it needs about 22 GB of system RAM and more video
+  memory than that card provides. Its ray-tracing and rendering fixes are
+  not portable to the Pascal GTX 1050 Ti without a separate backend.
+  [PortWatch report](https://portwatch-vi.xyz/data/tracker.json).
+
+- **[OpenScarlett Community Edition](https://github.com/OpenCommunityEdition/OpenScarlett)**
+  is useful for general D3D12 translation and sample coverage, but PortWatch
+  says it has not tried GTA VI's shaders. **[TuxBox](https://github.com/brcly/TuxBox)**
+  is a Linux/Proton-first path; its public run reaches an early prompt, while
+  large shader compilation and the Windows path remain unfinished. Neither
+  is evidence that this GTX 1050 Ti build can render the game world.
+
+### What this changes in our plan
+
+1. Do not silence the two device-method warnings with `S_OK`; identify the
+   methods and their output contracts before implementing them.
+2. Use the new launch preamble to verify that `VICTORY_CARD_BUFFERS=0`
+   really reached the process, and the new prelude-stage log to identify
+   whether allocator or command-list creation hits the memory failure.
+3. Address the measured host-memory and submission-thread pressure before
+   tuning for FPS. Avoid increasing GPU-local mirrors blindly: the current
+   WDDM budget is already exceeded in the diagnostic accounting.
+4. Continue treating the mesh fallback as experimental until a real scene is
+   captured and checked. CI and successfully created mesh pipelines are not
+   proof of correct world rendering.
