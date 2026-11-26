@@ -98,6 +98,42 @@ details, limitations, validation status, and the next acceptance gates. The
 is a useful reference but is a separate, newer code line and is not merged
 wholesale into this repository.
 
+### Latest GTX 1050 Ti diagnostic (2026-11-26)
+
+The newest `ztrx(10).log` did not reach a visible 3D scene. It ended at
+frame 2294 when a D3D12 command-list prelude failed with
+`0x8007000E`. The final detailed sample showed 18.0 GB private process
+memory, 446 MB free system RAM, 2.72 GB of host textures and 3.13 GB of
+card buffers. The submitting thread was busy for 0.51–0.94 seconds in
+sampled frames while the GPU was only about 21–39% busy. This points to
+memory pressure and CPU submission overhead, not a GPU that is simply
+underpowered at rendering.
+
+The same log shows 522 card buffers alive, so the launcher’s
+`VICTORY_CARD_BUFFERS=0` default was not confirmed active; the launcher
+preserves explicit environment overrides. It now writes the effective
+settings into `%TEMP%\ztrx.log`, and the D3D12 prelude failure now reports
+whether allocator creation, command-list creation or list close failed.
+
+Upstream VIctory issue [#417](https://github.com/Marvisak/VIctory/issues/417)
+reports the same `0x1c8` and `0x218` warnings. Upstream PR
+[#518](https://github.com/Marvisak/VIctory/pull/518) found that returning
+`S_OK` without writing the methods' output parameters crashes title worker
+threads; those methods must remain unsupported until their contracts are
+identified. See [the detailed log analysis and PortWatch comparison](docs/mesh-fallback-port.md).
+
+### Compatibility-layer research
+
+The most useful comparison is [fxceless/victory-fork](https://github.com/fxceless/victory-fork):
+its README reports 8–10 FPS in the first rooms on an RTX 4070 12 GB with
+32 GB system RAM, and identifies the CPU submitting thread as a bottleneck.
+[XCL](https://github.com/xcl-dev/xcl) demonstrates non-blocking pipeline
+creation and broad shader translation, but PortWatch still reports world-load
+and GPU-watchdog issues. The best-looking AMD fork is tested on a much larger
+system (RX 9070 XT 16 GB, 64 GB RAM) and is not a direct GTX 1050 Ti reference.
+PortWatch's claims are a tracker of public project reports, not all
+independently reproduced benchmarks.
+
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
