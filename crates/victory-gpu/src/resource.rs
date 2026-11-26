@@ -1408,9 +1408,8 @@ pub(crate) fn host_waits(this: This) -> bool {
     let r = resource(this);
     r.desc.dimension != BUFFER
         && !r.host.refused.load(std::sync::atomic::Ordering::Relaxed)
-        // Do not leave a descriptor waiting for a copy the VRAM policy will
-        // deliberately refuse. The title-filled copy can be recreated later.
-        && (!fills(&r.desc) || texture_room())
+        // Keep slots waiting while the copy is deferred: texture_made
+        // must remirror them when VRAM headroom returns.
         && r.host.made.lock().unwrap_or_else(|e| e.into_inner()).is_none()
 }
 
