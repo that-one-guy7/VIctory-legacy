@@ -54,3 +54,31 @@ cumulative "made so far" count; that number is not the live size of mesh
 scratch. Diagnostics now print live mesh-scratch chunk counts and bytes for
 both local and shared-memory chunks, so the next hardware log can verify how
 much this pool actually retains.
+
+
+## Stricter low-VRAM fallback profile
+
+When `VICTORY_MESH_FALLBACK=1`, the launcher supplies conservative defaults
+unless a process-level value is already set:
+
+- `VICTORY_MESH_LOCAL_BUDGET_MB=128`: limits retained local mesh scratch to
+  128 MiB; new scratch beyond the limit uses CPU-visible shared memory.
+- `VICTORY_LOCAL_UAV_BUDGET_PERCENT=70`: optional UAV optimizations stop
+  requesting local allocations at 70% of the DXGI budget (the general
+  default remains 85%). Required mesh scratch and indirect-argument buffers
+  are not denied by this optional-allocation gate.
+- `VICTORY_RENDER_SCALE=0.5`: eligible host-side render/depth targets use
+  half width and height (one quarter of the pixels).
+- `VICTORY_TEXTURE_MIP_DROP=2`: eligible large sampled textures omit their
+  top two mip levels on the host copy.
+
+The render-scale and mip-drop paths each have eligibility limits described
+in their respective documentation. They do not rewrite the title's resource
+descriptions, and they do not reduce every texture or render target. Texture
+mip dropping and render scaling reduce visual detail; the shared-memory mesh
+scratch fallback can reduce performance. Explicit process environment values
+still take precedence over these launcher defaults.
+
+For a clean test after earlier manual experiments, remove stale overrides for
+the four settings above before starting the launcher. The diagnostic header
+records the effective values so a log can confirm which profile actually ran.
