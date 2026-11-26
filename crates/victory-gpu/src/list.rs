@@ -1326,22 +1326,25 @@ pub(crate) struct Rect {
 }
 
 #[cfg(windows)]
-fn scaled_clear_rectangles(resource: This, rects: &[Rect]) -> Option<Vec<Rect>> {
+fn host_clear_rectangles(
+    resource: This,
+    rects: &[Rect],
+) -> Vec<windows::Win32::Foundation::RECT> {
     let (sx, sy) = crate::resource::host_render_scale(resource);
-    if sx >= 0.9999 && sy >= 0.9999 {
-        return None;
-    }
     let coordinate = |value: i32, scale: f32, upper: bool| {
         let scaled = f64::from(value) * f64::from(scale);
         let rounded = if upper { scaled.ceil() } else { scaled.floor() };
         rounded.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
     };
-    Some(rects.iter().map(|rect| Rect {
-        left: coordinate(rect.left, sx, false),
-        top: coordinate(rect.top, sy, false),
-        right: coordinate(rect.right, sx, true),
-        bottom: coordinate(rect.bottom, sy, true),
-    }).collect())
+    rects
+        .iter()
+        .map(|rect| windows::Win32::Foundation::RECT {
+            left: coordinate(rect.left, sx, false),
+            top: coordinate(rect.top, sy, false),
+            right: coordinate(rect.right, sx, true),
+            bottom: coordinate(rect.bottom, sy, true),
+        })
+        .collect()
 }
 
 extern "system" fn clear_rtv(
@@ -1371,8 +1374,9 @@ extern "system" fn clear_rtv(
             // SAFETY: the title passes `count` rectangles, laid out as the host's.
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
-        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
-        let rects = scaled_rects.as_deref().or(rects.as_deref());
+        let host_rects = rects
+            .as_deref()
+            .map(|rects| host_clear_rectangles(record.resource, rects));
         const RENDER_TARGET: u32 = 0x4;
         let rtv = host.rtv(Some(texture), record.desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
@@ -1385,7 +1389,7 @@ extern "system" fn clear_rtv(
                     State(RENDER_TARGET as i32),
                 )]);
             }
-            list.list.ClearRenderTargetView(rtv, color, rects);
+            list.list.ClearRenderTargetView(rtv, color, host_rects.as_deref());
         }
     }
     #[cfg(not(windows))]
@@ -1420,8 +1424,9 @@ extern "system" fn clear_dsv(
             // SAFETY: the title passes `count` rectangles, laid out as the host's.
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
-        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
-        let rects = scaled_rects.as_deref().or(rects.as_deref());
+        let host_rects = rects
+            .as_deref()
+            .map(|rects| host_clear_rectangles(record.resource, rects));
         const DEPTH_WRITE: u32 = 0x10;
         // A depth texture shaders also write: what they wrote, first (the
         // clear may be of one slice or of some rectangles).
@@ -1434,7 +1439,7 @@ extern "system" fn clear_dsv(
         // SAFETY: an open list, a fresh view of a live texture.
         unsafe {
             list.list
-                .ClearDepthStencilView(dsv, D3D12_CLEAR_FLAGS(flags as i32 & 3), depth, stencil, rects)
+                .ClearDepthStencilView(dsv, D3D12_CLEAR_FLAGS(flags as i32 & 3), depth, stencil, host_rects.as_deref())
         };
     }
     #[cfg(not(windows))]
