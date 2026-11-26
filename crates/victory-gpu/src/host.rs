@@ -3093,6 +3093,15 @@ impl Host {
         #[cfg(feature = "diagnostics")]
         let before = private_bytes();
         let list = self.make_list();
+        // DRED reports the command-list debug name even when its COM pointer
+        // cannot be matched to the current submission's HostList references.
+        // Give every host list a stable process-local identity for that report.
+        if dred_on() && let Ok(list) = &list {
+            static NEXT_DRED_LIST_ID: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT_DRED_LIST_ID.fetch_add(1, Ordering::Relaxed);
+            name(&list.list, || format!("VIctory host command list #{id}"));
+        }
         LISTS[0].fetch_add(1, Ordering::Relaxed);
         // (May shrink while a list is made, on another thread's account:
         // added as it is, the sum is what counts.)
@@ -4541,7 +4550,24 @@ impl Host {
                 let done = p.pLastBreadcrumbValue.as_ref().copied().unwrap_or(0);
                 let ours = p.pCommandList.as_ref().map(|l| l.as_raw());
                 let index = runs.iter().position(|r| Some(r.list.as_raw()) == ours);
-                progress.push(format!("{done}/{} {index:?}", p.BreadcrumbCount));
+                let list_name = if p.pCommandListDebugNameW.is_null() {
+                    "<unnamed>".to_string()
+                } else {
+                    p.pCommandListDebugNameW
+                        .to_string()
+                        .unwrap_or_else(|_| "<unreadable-name>".to_string())
+                };
+                let queue_name = if p.pCommandQueueDebugNameW.is_null() {
+                    "<unnamed>".to_string()
+                } else {
+                    p.pCommandQueueDebugNameW
+                        .to_string()
+                        .unwrap_or_else(|_| "<unreadable-name>".to_string())
+                };
+                progress.push(format!(
+                    "{done}/{} {index:?} list={list_name:?} queue={queue_name:?}",
+                    p.BreadcrumbCount
+                ));
                 node = p.pNext;
             }
             text.push_str(&format!("; breadcrumbs (done/count, list) {progress:?}"));
