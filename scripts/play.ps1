@@ -104,25 +104,70 @@ New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
 
-# Record the *effective* process environment before starting the title. The
-# fallback profile intentionally preserves explicit values, so this makes
-# stale PowerShell overrides visible in the same log as runtime diagnostics.
+# Write a compact, reproducible diagnostic header. Keep this to VICTORY_*
+# settings rather than dumping the entire process environment (which may
+# contain credentials or unrelated personal data).
 $RuntimeLog = Join-Path $env:TEMP "ztrx.log"
-@(
-    "VIctory launcher"
-    "executable=$ExePath"
-    "game=$GamePath"
-    "VICTORY_MESH_FALLBACK=$env:VICTORY_MESH_FALLBACK"
-    "VICTORY_DISPLAY_MODE=$env:VICTORY_DISPLAY_MODE"
-    "VICTORY_CARD_BUFFERS=$env:VICTORY_CARD_BUFFERS"
-    "VICTORY_CARD_BUFFERS_MIN_MB=$env:VICTORY_CARD_BUFFERS_MIN_MB"
-    "VICTORY_CARD_BUFFERS_MB=$env:VICTORY_CARD_BUFFERS_MB"
-    "VICTORY_CARD_WINDOWS_MB=$env:VICTORY_CARD_WINDOWS_MB"
-    "VICTORY_D3D12_DEBUG=$env:VICTORY_D3D12_DEBUG"
-    "VICTORY_D3D12_GBV=$env:VICTORY_D3D12_GBV"
-    "VICTORY_D3D12_DRED=$env:VICTORY_D3D12_DRED"
-) | Set-Content -LiteralPath $RuntimeLog -Encoding utf8
+$Report = [System.Collections.Generic.List[string]]::new()
+$Report.Add("VIctory launcher diagnostic report")
+$Report.Add("timestamp_local=$([DateTimeOffset]::Now.ToString('o'))")
+$Report.Add("executable=$ExePath")
+$Report.Add("game=$GamePath")
+$Report.Add("profile=$ProfileName")
+$Report.Add("agility_sdk_expected=$ExpectedSdkVersion")
+$Report.Add("agility_sdk_installed=$((Get-Content -LiteralPath $VersionMarker -Raw).Trim())")
+$Report.Add("powershell=$($PSVersionTable.PSVersion)")
+$Report.Add("os=$([Environment]::OSVersion.VersionString)")
+
+# Include every effective wrapper setting, including newly added switches.
+# This is especially useful when a previous PowerShell session left overrides
+# active; the launcher deliberately does not erase explicit user choices.
+$Report.Add("")
+$Report.Add("[effective VICTORY_* environment]")
+[Environment]::GetEnvironmentVariables("Process").GetEnumerator() |
+    Where-Object { $_.Key -like "VICTORY_*" } |
+    Sort-Object Key |
+    ForEach-Object { $Report.Add("$($_.Key)=$($_.Value)") }
+
+# Hardware data helps interpret memory failures and driver-specific behavior.
+# CIM is best-effort: a restricted Windows installation must still launch.
+try {
+    $OsInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $Report.Add("")
+    $Report.Add("[system memory]")
+    $Report.Add("physical_memory_total_mb=$([math]::Round($OsInfo.TotalVisibleMemorySize / 1024))")
+    $Report.Add("physical_memory_free_mb=$([math]::Round($OsInfo.FreePhysicalMemory / 1024))")
+} catch {
+    $Report.Add("system_memory_query=unavailable ($($_.Exception.Message))")
+}
+try {
+    $CpuInfo = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
+        Select-Object -First 1
+    $Report.Add("")
+    $Report.Add("[processor]")
+    $Report.Add("cpu=$($CpuInfo.Name)")
+    $Report.Add("cpu_logical_processors=$($CpuInfo.NumberOfLogicalProcessors)")
+} catch {
+    $Report.Add("processor_query=unavailable ($($_.Exception.Message))")
+}
+try {
+    $GpuInfo = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)
+    $Report.Add("")
+    $Report.Add("[display adapters]")
+    foreach ($Gpu in $GpuInfo) {
+        $Report.Add("gpu=$($Gpu.Name); driver=$($Gpu.DriverVersion); adapter_memory_bytes=$($Gpu.AdapterRAM)")
+    }
+} catch {
+    $Report.Add("display_adapter_query=unavailable ($($_.Exception.Message))")
+}
+
+[System.IO.File]::WriteAllLines(
+    $RuntimeLog,
+    $Report,
+    [System.Text.UTF8Encoding]::new($false)
+)
 
 & $ExePath run $GamePath --execute 2>&1 | Out-File $RuntimeLog -Append -Encoding utf8
 $ExitCode = $LASTEXITCODE
+Add-Content -LiteralPath $RuntimeLog -Value @("", "[launcher exit]", "exit_code=$ExitCode", "finished_local=$([DateTimeOffset]::Now.ToString('o'))") -Encoding utf8
 Write-Host "Exited with $ExitCode; log: $RuntimeLog"
