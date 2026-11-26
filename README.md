@@ -138,6 +138,15 @@ system (RX 9070 XT 16 GB, 64 GB RAM) and is not a direct GTX 1050 Ti reference.
 PortWatch's claims are a tracker of public project reports, not all
 independently reproduced benchmarks.
 
+### GPU allocation headroom guard (2026-11-26)
+
+The 85% DXGI local-memory guard is limited to optional GPU optimizations
+(card-buffer shadows/hash staging, depth twins and texture alias-copy staging).
+Required mesh scratch and indirect-argument buffers retain their prior
+allocation path so a budget refusal cannot silently disable core rendering
+work. This is still advisory rather than a global VRAM cap; see
+[docs/local-uav-memory-headroom.md](docs/local-uav-memory-headroom.md).
+
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
