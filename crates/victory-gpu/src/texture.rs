@@ -486,11 +486,19 @@ pub(crate) fn host_written(resource: This) {
 /// ([`host_written`]): its host copy cannot be made again from title
 /// memory.
 pub(crate) fn host_wrote(resource: usize) -> bool {
-    HOST_WRITTEN
+    if HOST_WRITTEN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .is_some_and(|set| set.contains(&resource))
+    {
+        return true;
+    }
+    HOST_WRITTEN_SUBRESOURCES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|map| map.contains_key(&resource))
 }
 
 
