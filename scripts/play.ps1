@@ -90,8 +90,6 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
         VICTORY_CARD_REHASH_RUNS = "1"
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
-        VICTORY_RELAY = "1"
-        VICTORY_LATE_WAIT_LISTS = "16"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name, "Process"))) {
