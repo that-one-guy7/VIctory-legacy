@@ -127,6 +127,10 @@ struct List {
     /// at them before it runs `host`.
     #[cfg(windows)]
     gate: Vec<ValueWait>,
+    /// First host D3D12 Close failure in this title recording, propagated
+    /// by the title list's own Close method.
+    #[cfg(windows)]
+    close_error: std::sync::atomic::AtomicI32,
 }
 
 /// One part of a title list cut at its waits: the waits the queue stands
@@ -296,6 +300,22 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
 /// console, never earlier, and nothing can wait for itself that way (a
 /// part has no wait after its first work).
 #[cfg(windows)]
+fn remember_close_error(this: This, error: &windows::core::Error) -> HRESULT {
+    let code = error.code().0;
+    if !this.is_null() {
+        // SAFETY: the caller holds the live title list while recording it.
+        let list = unsafe { &*this.cast::<List>() };
+        let _ = list.close_error.compare_exchange(
+            S_OK,
+            code,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+    code
+}
+
+#[cfg(windows)]
 fn cut(this: This, wait: ValueWait) {
     if this.is_null() {
         return;
@@ -318,7 +338,9 @@ fn cut(this: This, wait: ValueWait) {
         list.gate.push(wait);
         return;
     };
-    current.close();
+    if let Err(error) = current.close() {
+        remember_close_error(this, &error);
+    }
     static CUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if CUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
         tracing::info!(parts = list.earlier.len() + 2, "a list is cut at a wait for a memory value");
@@ -392,7 +414,7 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
         };
         // A new host list is open; the title's next call on its list is a
         // reset, which wants it closed.
-        fresh.close();
+        let _ = fresh.close();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
@@ -464,7 +486,7 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
         };
         // A new host list is open; the title's next call on its list is a
         // reset, which wants it closed.
-        fresh.close();
+        let _ = fresh.close();
         let list = this.cast_mut().cast::<List>();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
@@ -589,6 +611,8 @@ fn new_list(
         earlier: Vec::new(),
         #[cfg(windows)]
         gate: Vec::new(),
+        #[cfg(windows)]
+        close_error: std::sync::atomic::AtomicI32::new(S_OK),
     });
     #[cfg(not(windows))]
     let _ = pipeline;
@@ -619,9 +643,21 @@ extern "system" fn list_type(this: This) -> u32 {
 }
 extern "system" fn close(this: This) -> HRESULT {
     #[cfg(windows)]
-    if let Some(host) = host_list(this) {
-        host.close();
+    {
+        if let Some(host) = host_list(this)
+            && let Err(error) = host.close()
+        {
+            return remember_close_error(this, &error);
+        }
+        if !this.is_null() {
+            // SAFETY: the title passes a live command list.
+            return unsafe { &*this.cast::<List>() }
+                .close_error
+                .load(std::sync::atomic::Ordering::Acquire);
+        }
     }
+    #[cfg(not(windows))]
+    let _ = this;
     S_OK
 }
 extern "system" fn reset(this: This, allocator: This, pipeline: This) -> HRESULT {
@@ -652,6 +688,13 @@ extern "system" fn reset(this: This, allocator: This, pipeline: This) -> HRESULT
         host.reset();
         state.reset(pipeline);
     });
+    #[cfg(windows)]
+    if !this.is_null() {
+        // SAFETY: Reset is called on the title's live list.
+        unsafe { &*this.cast::<List>() }
+            .close_error
+            .store(S_OK, std::sync::atomic::Ordering::Release);
+    }
     #[cfg(not(windows))]
     let _ = (this, pipeline);
     S_OK
@@ -2181,7 +2224,9 @@ fn value_written(this: This, address: u64, value: u64) {
         let Some(fresh) = fresh_list() else {
             return;
         };
-        current.close();
+        if let Err(error) = current.close() {
+            remember_close_error(this, &error);
+        }
         if let Some(done) = list.host.replace(fresh) {
             // The part so far keeps its waits; nothing stands before the
             // next one but this part itself.
