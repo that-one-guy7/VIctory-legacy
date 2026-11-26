@@ -6563,6 +6563,7 @@ fn reserve_mesh_local_pool(size: u64, limit: u64) -> bool {
 /// Live mesh-scratch chunks: local buffer count/bytes, then shared buffer
 /// count/bytes. Exposed to diagnostics so hardware runs can confirm which
 /// scratch path was actually used.
+#[cfg(feature = "diagnostics")]
 pub(crate) fn mesh_scratch_stats() -> [u64; 4] {
     [
         MESH_LOCAL_POOL_BUFFERS.load(Ordering::Relaxed),
