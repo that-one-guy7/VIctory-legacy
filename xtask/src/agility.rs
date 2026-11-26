@@ -44,6 +44,9 @@ pub fn run(target: &Path) -> Result<()> {
             let file = dir.join(name.rsplit('/').next().unwrap_or(name));
             std::fs::write(&file, bytes).with_context(|| format!("writing {}", file.display()))?;
         }
+        let marker = dir.join("VICTORY_AGILITY_SDK_VERSION");
+        std::fs::write(&marker, format!("{VERSION}\n"))
+            .with_context(|| format!("writing {}", marker.display()))?;
         println!("D3D12 Agility SDK {VERSION}: {}", dir.display());
     }
     Ok(())

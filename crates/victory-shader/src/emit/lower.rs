@@ -114,6 +114,19 @@ const MESH_VERTICES: u8 = 0;
 const MESH_INDICES: u8 = 1;
 const MESH_PRIMITIVES: u8 = 2;
 
+/// Converts mesh-local indices to the concatenated vertex-buffer address space.
+/// Expanded draws leave them local: the generated vertex shader adds the group base.
+fn mesh_index_values<T: Copy>(
+    values: &[T],
+    vertex_base: Option<T>,
+    mut add: impl FnMut(T, T) -> T,
+) -> Vec<T> {
+    match vertex_base {
+        Some(base) => values.iter().copied().map(|value| add(value, base)).collect(),
+        None => values.to_vec(),
+    }
+}
+
 /// The f16 bits of inline float constant `c` (240..=248: 0.5, -0.5, 1.0,
 /// -1.0, 2.0, -2.0, 4.0, -4.0, 1/(2 pi)).
 fn inline_f16(c: u8) -> u32 {
@@ -4094,8 +4107,23 @@ impl<'a> Lower<'a> {
         let off = self.s.m.bin(c, Bin::Add, base, dword_bytes);
         let h = self.s.mesh_out_handle(out);
         let iu = self.s.m.undef(self.s.t.i32);
+        // Mesh indices are local to their dispatch group. The fallback
+        // concatenates every group's vertices into one vertex buffer and
+        // issues one draw, so add this group's vertex-record base before
+        // storing the three indices. This also keeps the default culled
+        // triangles degenerate at the first vertex of their own group.
+        // Apply the group vertex base exactly once, here, for indexed draws.
+        // Expanded draws keep local indices; their generated vertex shader
+        // applies the group base from SV_VertexID.
+        let vertex_base = (out == MESH_INDICES && self.s.prims.is_empty()).then(|| {
+            let vertices_per_group = self.s.m.i32(mesh.max_vertices);
+            self.s.m.bin(c, Bin::Mul, g, vertices_per_group)
+        });
+        let values = mesh_index_values(vals, vertex_base, |value, base| {
+            self.s.m.bin(c, Bin::Add, value, base)
+        });
         let mut args = vec![h, off, iu];
-        args.extend_from_slice(vals);
+        args.extend_from_slice(&values);
         args.resize(7, iu);
         args.push(self.s.m.i8((1u8 << vals.len()) - 1));
         args.push(self.s.m.i32(4));
@@ -10439,18 +10467,11 @@ impl<'a> Lower<'a> {
         for (k, slot) in indices.iter_mut().enumerate() {
             let (shift, mask) = (self.s.m.i32(10 * k as u32), self.s.m.i32(0x3FF));
             let i = self.s.m.bin(c, Bin::LShr, x, shift);
-            let mut i = self.s.m.bin(c, Bin::And, i, mask);
+            let i = self.s.m.bin(c, Bin::And, i, mask);
             if let Some(n) = written {
                 let n = self.s.m.i32(n);
                 let past = self.s.m.cmp(c, pred::IUGE, i, n);
                 culled = self.s.m.bin(c, Bin::Or, culled, past);
-            }
-            if self.s.mesh_as_compute {
-                let group = self.mesh_group_id();
-                let max_vertices = self.s.mesh.expect("mesh").max_vertices;
-                let max_vertices = self.s.m.i32(max_vertices);
-                let first = self.s.m.bin(c, Bin::Mul, group, max_vertices);
-                i = self.s.m.bin(c, Bin::Add, i, first);
             }
             *slot = i;
         }
@@ -10831,6 +10852,23 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn mesh_indices_receive_the_group_base_exactly_once() {
+        let local = [0u32, 1, 2];
+        // Non-expanded indexed draws store global indices in the shared
+        // vertex buffer: group 3 starts after 3 * 128 vertex records.
+        assert_eq!(
+            super::mesh_index_values(&local, Some(3 * 128), |index, base| index + base),
+            [384, 385, 386]
+        );
+        // Expanded draws keep local indices because mesh_vs adds the group
+        // base when it resolves SV_VertexID for each corner.
+        assert_eq!(
+            super::mesh_index_values(&local, None, |index, base| index + base),
+            local
+        );
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

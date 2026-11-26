@@ -8,7 +8,7 @@
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
-use victory_shader::emit::{ROOT_CBV_SPACE, SAMPLER_SPACE, USER_DATA_SPACE};
+use victory_shader::emit::{MESH_COMPUTE_SPACES, MESH_OUT_SPACE, ROOT_CBV_SPACE, SAMPLER_SPACE, USER_DATA_SPACE};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -87,6 +87,62 @@ impl Default for GraphicsState {
             },
         }
     }
+}
+
+
+/// Integer render-target formats: D3D12 does not permit blending into them.
+fn integer_format(f: DXGI_FORMAT) -> bool {
+    matches!(
+        f,
+        DXGI_FORMAT_R32G32B32A32_UINT
+            | DXGI_FORMAT_R32G32B32A32_SINT
+            | DXGI_FORMAT_R32G32B32_UINT
+            | DXGI_FORMAT_R32G32B32_SINT
+            | DXGI_FORMAT_R16G16B16A16_UINT
+            | DXGI_FORMAT_R16G16B16A16_SINT
+            | DXGI_FORMAT_R32G32_UINT
+            | DXGI_FORMAT_R32G32_SINT
+            | DXGI_FORMAT_R10G10B10A2_UINT
+            | DXGI_FORMAT_R8G8B8A8_UINT
+            | DXGI_FORMAT_R8G8B8A8_SINT
+            | DXGI_FORMAT_R16G16_UINT
+            | DXGI_FORMAT_R16G16_SINT
+            | DXGI_FORMAT_R32_UINT
+            | DXGI_FORMAT_R32_SINT
+            | DXGI_FORMAT_R8G8_UINT
+            | DXGI_FORMAT_R8G8_SINT
+            | DXGI_FORMAT_R16_UINT
+            | DXGI_FORMAT_R16_SINT
+            | DXGI_FORMAT_R8_UINT
+            | DXGI_FORMAT_R8_SINT
+    )
+}
+
+/// The title ignores blending on integer targets; D3D12 rejects it. When
+/// blending is independent, change only the affected targets. Otherwise make
+/// the states independent so non-integer targets retain the title's blend.
+fn host_blend(blend: &D3D12_BLEND_DESC, targets: &D3D12_RT_FORMAT_ARRAY) -> D3D12_BLEND_DESC {
+    let count = (targets.NumRenderTargets as usize).min(8);
+    let per_target = blend.IndependentBlendEnable.as_bool();
+    let blends = |i: usize| {
+        blend.RenderTarget[if per_target { i } else { 0 }]
+            .BlendEnable
+            .as_bool()
+    };
+    if !(0..count).any(|i| integer_format(targets.RTFormats[i]) && blends(i)) {
+        return *blend;
+    }
+    let mut host = *blend;
+    if !per_target {
+        host.IndependentBlendEnable = true.into();
+        host.RenderTarget = [blend.RenderTarget[0]; 8];
+    }
+    for i in 0..count {
+        if integer_format(targets.RTFormats[i]) {
+            host.RenderTarget[i].BlendEnable = false.into();
+        }
+    }
+    host
 }
 
 impl GraphicsState {
@@ -286,11 +342,33 @@ impl Stage {
     }
 }
 
+/// The host-side pipelines and root parameters for a mesh fallback.
+pub(crate) struct MeshFallback {
+    /// Compute-only root signature; its mesh-stage parameters keep the same
+    /// indices as the graphics signature but use ALL visibility.
+    pub(crate) root: ID3D12RootSignature,
+    pub(crate) compute: ID3D12PipelineState,
+    pub(crate) layout: victory_shader::emit::MeshLayout,
+    pub(crate) outputs: [u32; 3],
+    pub(crate) inputs: [u32; 3],
+    pub(crate) expanded: bool,
+    /// Optional indirect command conversion; direct dispatch still works
+    /// when command-signature creation is unavailable.
+    pub(crate) indirect: Option<MeshIndirect>,
+}
+
+pub(crate) struct MeshIndirect {
+    pub(crate) regions: crate::mesh_indirect::Regions,
+    pub(crate) signatures: crate::mesh_indirect::Signatures,
+}
+
 pub(crate) struct HostPipeline {
     /// A compute pipeline (else graphics).
     pub(crate) compute: bool,
     /// A mesh pipeline (graphics without vertex input).
     pub(crate) mesh: bool,
+    /// Compute/vertex replacement for a native mesh pipeline.
+    pub(crate) fallback: Option<MeshFallback>,
     pub(crate) pso: ID3D12PipelineState,
     pub(crate) root: ID3D12RootSignature,
     /// Vertex, then pixel stage, or the compute stage.
@@ -344,10 +422,35 @@ impl HostPipeline {
             );
         }
         let mesh = find("mesh");
+        let host_device = host()?;
+        let fallback = match mesh {
+            Some(ms) if host_device.mesh_fallback() => {
+                let Some(f) = ms.mesh_fallback() else {
+                    return refuse("the mesh shader does not translate as compute", shaders);
+                };
+                let native = &ms.translated()?.host;
+                if f.compute.user_data != native.user_data
+                    || f.compute.samplers != native.samplers
+                    || f.compute.static_samplers != native.static_samplers
+                    || f.compute.root_cbvs != native.root_cbvs
+                    || f.compute.root_srvs != native.root_srvs
+                    || f.compute.root_uavs != native.root_uavs
+                    || f.compute.root_indexed_views != native.root_indexed_views
+                {
+                    return refuse(
+                        "mesh shader bindings change when lowered as compute",
+                        shaders,
+                    );
+                }
+                Some(f)
+            }
+            _ => None,
+        };
         let stages = if let Some(cs) = compute {
             vec![(cs, D3D12_SHADER_VISIBILITY_ALL)]
         } else {
             let first = match (mesh, find("vertex")) {
+                (Some(ms), _) if fallback.is_some() => (ms, D3D12_SHADER_VISIBILITY_VERTEX),
                 (Some(ms), _) => (ms, D3D12_SHADER_VISIBILITY_MESH),
                 (None, Some(vs)) => (vs, D3D12_SHADER_VISIBILITY_VERTEX),
                 (None, None) => return refuse("no vertex or mesh shader", shaders),
@@ -356,13 +459,18 @@ impl HostPipeline {
             stages.extend(find("pixel").map(|ps| (ps, D3D12_SHADER_VISIBILITY_PIXEL)));
             stages
         };
-        if mesh.is_some() && !host()?.mesh_shaders() {
-            return refuse("the host GPU has no mesh shaders (or no shader model 6.6)", shaders);
+        if mesh.is_some() && fallback.is_none() && !host_device.mesh_shaders() {
+            let reason = if !host_device.bindless_heaps() {
+                "mesh fallback requires Shader Model 6.6 and Resource Binding Tier 3 for directly indexed heaps"
+            } else {
+                "the host has no native mesh shaders and this mesh program cannot be lowered to compute"
+            };
+            return refuse(reason, shaders);
         }
         for (s, _) in &stages {
             s.translated()?;
         }
-        let host = host()?;
+        let host = host_device;
 
         // The root signature the translated shaders' bindings define.
         let mut params: Vec<D3D12_ROOT_PARAMETER1> = Vec::new();
@@ -371,8 +479,11 @@ impl HostPipeline {
         let mut ranges: Vec<Box<D3D12_DESCRIPTOR_RANGE1>> = Vec::new();
         let mut samplers = Vec::new();
         let mut bound = Vec::new();
-        for &(shader, visibility) in &stages {
+        let mut mesh_param_count = 0usize;
+        let mut mesh_sampler_count = 0usize;
+        for (index, &(shader, visibility)) in stages.iter().enumerate() {
             let t = &shader.translated()?.host;
+            let shift = if fallback.is_some() && index == 0 { MESH_COMPUTE_SPACES } else { 0 };
             let mut stage = Stage {
                 shader: shader.clone(),
                 user_data: None,
@@ -388,7 +499,7 @@ impl HostPipeline {
                     Anonymous: D3D12_ROOT_PARAMETER1_0 {
                         Constants: D3D12_ROOT_CONSTANTS {
                             ShaderRegister: 0,
-                            RegisterSpace: USER_DATA_SPACE,
+                            RegisterSpace: USER_DATA_SPACE + shift,
                             Num32BitValues: dwords,
                         },
                     },
@@ -428,19 +539,7 @@ impl HostPipeline {
                         // reads (and a root UAV's writes), which a root
                         // descriptor leaves unbounded.
                         // (Our own table of strides stays a descriptor.)
-                        ranges.push(Box::new(D3D12_DESCRIPTOR_RANGE1 {
-                            RangeType: if uav {
-                                D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-                            } else {
-                                D3D12_DESCRIPTOR_RANGE_TYPE_SRV
-                            },
-                            NumDescriptors: 1,
-                            BaseShaderRegister: u32::from(slot),
-                            RegisterSpace: ROOT_CBV_SPACE,
-                            Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
-                                | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-                            OffsetInDescriptorsFromTableStart: 0,
-                        }));
+                        ranges.push(Box::new(root_view_range(uav, slot, shift)));
                         let range: *const D3D12_DESCRIPTOR_RANGE1 = &**ranges.last()?;
                         out.push((slot, params.len() as u32));
                         params.push(D3D12_ROOT_PARAMETER1 {
@@ -461,7 +560,7 @@ impl HostPipeline {
                         Anonymous: D3D12_ROOT_PARAMETER1_0 {
                             Descriptor: D3D12_ROOT_DESCRIPTOR1 {
                                 ShaderRegister: u32::from(slot),
-                                RegisterSpace: ROOT_CBV_SPACE,
+                                RegisterSpace: ROOT_CBV_SPACE + shift,
                                 Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
                             },
                         },
@@ -482,12 +581,74 @@ impl HostPipeline {
                     MinLOD: s.min_lod,
                     MaxLOD: s.max_lod,
                     ShaderRegister: n as u32,
-                    RegisterSpace: SAMPLER_SPACE,
+                    RegisterSpace: SAMPLER_SPACE + shift,
                     ShaderVisibility: visibility,
                 });
             }
             bound.push(stage);
+            if index == 0 {
+                mesh_param_count = params.len();
+                mesh_sampler_count = samplers.len();
+            }
         }
+        // The compute producer writes u0-u2; the generated vertex shader
+        // reads the same buffers as t0-t2. Keep these in their own space.
+        let fallback_params = fallback.as_ref().map(|_| {
+            // The graphics signature only needs the generated vertex
+            // shader's SRVs. The compute producer gets its own root signature
+            // below, so its UAVs cannot overlap pixel-stage bindings.
+            let first = params.len() as u32;
+            for register in 0..3 {
+                params.push(D3D12_ROOT_PARAMETER1 {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                    Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                        Descriptor: D3D12_ROOT_DESCRIPTOR1 {
+                            ShaderRegister: register,
+                            RegisterSpace: MESH_OUT_SPACE,
+                            Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
+                        },
+                    },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_VERTEX,
+                });
+            }
+            (
+                [mesh_param_count as u32, mesh_param_count as u32 + 1, mesh_param_count as u32 + 2],
+                [first, first + 1, first + 2],
+            )
+        });
+        let fallback_compute_root = if fallback.is_some() {
+            let mut compute_params = params[..mesh_param_count].to_vec();
+            for param in &mut compute_params {
+                param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            }
+            let mut compute_samplers = samplers[..mesh_sampler_count].to_vec();
+            for sampler in &mut compute_samplers {
+                sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            }
+            let outputs = [mesh_param_count as u32, mesh_param_count as u32 + 1, mesh_param_count as u32 + 2];
+            for register in 0..3 {
+                compute_params.push(D3D12_ROOT_PARAMETER1 {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                    Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                        Descriptor: D3D12_ROOT_DESCRIPTOR1 {
+                            ShaderRegister: register,
+                            RegisterSpace: MESH_OUT_SPACE,
+                            Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
+                        },
+                    },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+                });
+            }
+            match root_signature(&host.device, &compute_params, &compute_samplers, true) {
+                Ok((root, blob)) => Some((root, blob, outputs)),
+                Err(e) => {
+                    tracing::warn!(error = %e, ?shaders, "mesh fallback compute root signature refused");
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let (root, root_blob) = match root_signature(&host.device, &params, &samplers, compute.is_some()) {
             Ok(root) => root,
             Err(e) => {
@@ -532,6 +693,7 @@ impl HostPipeline {
             return Some(HostPipeline {
                 compute: true,
                 mesh: false,
+                fallback: None,
                 pso,
                 root,
                 stages: bound,
@@ -546,6 +708,119 @@ impl HostPipeline {
             return refuse("graphics state not kept (plain description)", shaders);
         };
         let state = g.describe();
+        if let (Some(f), Some((_, inputs))) = (fallback, fallback_params) {
+            let (compute_root, compute_root_blob, outputs) =
+                fallback_compute_root.expect("fallback compute root was built above");
+            let bytes = |dxil: &[u8]| D3D12_SHADER_BYTECODE {
+                pShaderBytecode: dxil.as_ptr().cast(),
+                BytecodeLength: dxil.len(),
+            };
+            let cs = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                // SAFETY: a borrowed pointer the description never releases.
+                pRootSignature: unsafe { std::mem::transmute_copy(&compute_root) },
+                CS: bytes(&f.compute.dxil),
+                ..Default::default()
+            };
+            let cs_name = super::library::name("mesh-fallback-cs", &compute_root_blob, &[&f.compute.dxil], "");
+            let made = super::library::pipeline(
+                &cs_name,
+                |library, name| unsafe { library.LoadComputePipeline(name, &cs) },
+                || unsafe { host.device.CreateComputePipelineState(&cs) },
+            );
+            let compute_pso = match made {
+                Ok(pso) => pso,
+                Err(e) => {
+                    tracing::warn!(error = %e, ?shaders, "mesh fallback compute pipeline refused");
+                    host.log_messages();
+                    return None;
+                }
+            };
+            let graphics = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                // SAFETY: a borrowed pointer the description never releases.
+                pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                VS: bytes(&f.vertex.dxil),
+                PS: code(1),
+                BlendState: host_blend(&g.blend, &g.targets),
+                SampleMask: g.sample_mask,
+                RasterizerState: g.rasterizer,
+                DepthStencilState: g.depth,
+                PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                NumRenderTargets: g.targets.NumRenderTargets,
+                RTVFormats: g.targets.RTFormats,
+                DSVFormat: g.depth_format,
+                SampleDesc: g.samples,
+                ..Default::default()
+            };
+            let graphics_name = super::library::name(
+                "mesh-fallback",
+                &root_blob,
+                &[&f.vertex.dxil, &code_bytes(&code(1))],
+                &state,
+            );
+            let made = super::library::pipeline(
+                &graphics_name,
+                |library, name| unsafe { library.LoadGraphicsPipeline(name, &graphics) },
+                || unsafe { host.device.CreateGraphicsPipelineState(&graphics) },
+            );
+            let pso = match made {
+                Ok(pso) => pso,
+                Err(e) => {
+                    tracing::warn!(error = %e, ?shaders, "mesh fallback graphics pipeline refused");
+                    host.log_messages();
+                    return None;
+                }
+            };
+            let indirect = {
+                let regions = crate::mesh_indirect::regions(&f.layout);
+                if regions.bytes > crate::mesh_indirect::BYTES {
+                    tracing::warn!(
+                        bytes = regions.bytes,
+                        limit = crate::mesh_indirect::BYTES,
+                        "mesh fallback indirect output exceeds its fixed batch buffer"
+                    );
+                    None
+                } else {
+                    match crate::mesh_indirect::signatures(
+                        &host.device,
+                        &compute_root,
+                        &root,
+                        outputs,
+                        inputs[0],
+                        f.expanded,
+                    ) {
+                        Ok(signatures) => Some(MeshIndirect { regions, signatures }),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mesh fallback indirect signatures unavailable");
+                            None
+                        }
+                    }
+                }
+            };
+            tracing::info!(?shaders, layout = ?f.layout, expanded = f.expanded, indirect = indirect.is_some(), "mesh fallback pipeline");
+            crate::host::name(&pso, || format!("{shaders:?} fallback graphics"));
+            crate::host::name(&compute_pso, || format!("{shaders:?} fallback compute"));
+            return Some(HostPipeline {
+                compute: false,
+                mesh: true,
+                fallback: Some(MeshFallback {
+                    root: compute_root,
+                    compute: compute_pso,
+                    layout: f.layout,
+                    outputs,
+                    inputs,
+                    expanded: f.expanded,
+                    indirect,
+                }),
+                pso,
+                root,
+                stages: bound,
+                name: format!("{shaders:?} fallback"),
+                slots: 0,
+                inputs: Vec::new(),
+                rects: false,
+                state,
+            });
+        }
         if mesh.is_some() {
             // "triangles": the stream names its topology since it did not
             // load from the library without one (see `mesh_pipeline`); a
@@ -570,6 +845,7 @@ impl HostPipeline {
             return Some(HostPipeline {
                 compute: false,
                 mesh: true,
+                fallback: None,
                 pso,
                 root,
                 stages: bound,
@@ -605,7 +881,7 @@ impl HostPipeline {
                     BytecodeLength: gs.len(),
                 }
             }),
-            BlendState: g.blend,
+            BlendState: host_blend(&g.blend, &g.targets),
             SampleMask: g.sample_mask,
             RasterizerState: g.rasterizer,
             DepthStencilState: g.depth,
@@ -682,6 +958,7 @@ impl HostPipeline {
         Some(HostPipeline {
             compute: false,
             mesh: false,
+            fallback: None,
             pso,
             root,
             stages: bound,
@@ -794,6 +1071,25 @@ fn code_bytes(code: &D3D12_SHADER_BYTECODE) -> Vec<u8> {
     }
     // SAFETY: a translation's own bytes, alive while its shader is.
     unsafe { std::slice::from_raw_parts(code.pShaderBytecode.cast::<u8>(), code.BytecodeLength) }.to_vec()
+}
+
+/// A bounded table for one title root view. Mesh fallback shader bindings are
+/// shifted into a separate register space, so the descriptor range must move
+/// with the corresponding root descriptors, user data, and samplers.
+fn root_view_range(uav: bool, slot: u8, shift: u32) -> D3D12_DESCRIPTOR_RANGE1 {
+    D3D12_DESCRIPTOR_RANGE1 {
+        RangeType: if uav {
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+        } else {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+        },
+        NumDescriptors: 1,
+        BaseShaderRegister: u32::from(slot),
+        RegisterSpace: ROOT_CBV_SPACE + shift,
+        Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
+            | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        OffsetInDescriptorsFromTableStart: 0,
+    }
 }
 
 fn root_signature(
@@ -928,4 +1224,86 @@ mod tests {
             "the mesh pipeline was compiled again instead of loaded from the library"
         );
     }
+
+    #[test]
+    fn root_view_ranges_follow_mesh_compute_register_space_shift() {
+        let ordinary = root_view_range(false, 2, 0);
+        assert_eq!(ordinary.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+        assert_eq!(ordinary.BaseShaderRegister, 2);
+        assert_eq!(ordinary.RegisterSpace, ROOT_CBV_SPACE);
+
+        let fallback_srv = root_view_range(false, 3, MESH_COMPUTE_SPACES);
+        assert_eq!(fallback_srv.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+        assert_eq!(fallback_srv.BaseShaderRegister, 3);
+        assert_eq!(
+            fallback_srv.RegisterSpace,
+            ROOT_CBV_SPACE + MESH_COMPUTE_SPACES
+        );
+
+        let fallback_uav = root_view_range(true, 1, MESH_COMPUTE_SPACES);
+        assert_eq!(fallback_uav.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_UAV);
+        assert_eq!(fallback_uav.BaseShaderRegister, 1);
+        assert_eq!(
+            fallback_uav.RegisterSpace,
+            ROOT_CBV_SPACE + MESH_COMPUTE_SPACES
+        );
+    }
+
+    fn target_formats(formats: &[DXGI_FORMAT]) -> D3D12_RT_FORMAT_ARRAY {
+        let mut targets = D3D12_RT_FORMAT_ARRAY {
+            NumRenderTargets: formats.len() as u32,
+            ..Default::default()
+        };
+        targets.RTFormats[..formats.len()].copy_from_slice(formats);
+        targets
+    }
+
+    fn blending(independent: bool) -> D3D12_BLEND_DESC {
+        let mut blend = GraphicsState::default().blend;
+        blend.IndependentBlendEnable = independent.into();
+        for target in &mut blend.RenderTarget {
+            target.BlendEnable = true.into();
+            target.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            target.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        }
+        blend
+    }
+
+    #[test]
+    fn integer_render_targets_disable_blending_without_changing_other_targets() {
+        let targets = target_formats(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R8_UINT,
+        ]);
+        for independent in [false, true] {
+            let actual = host_blend(&blending(independent), &targets);
+            assert!(actual.IndependentBlendEnable.as_bool());
+            assert!(actual.RenderTarget[0].BlendEnable.as_bool());
+            assert!(actual.RenderTarget[1].BlendEnable.as_bool());
+            assert!(!actual.RenderTarget[2].BlendEnable.as_bool());
+            assert_eq!(actual.RenderTarget[2].SrcBlend, D3D12_BLEND_SRC_ALPHA);
+            assert_eq!(actual.RenderTarget[0].DestBlend, D3D12_BLEND_INV_SRC_ALPHA);
+        }
+    }
+
+    #[test]
+    fn blend_states_without_active_integer_blending_are_preserved() {
+        let blend = blending(false);
+        let targets = target_formats(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R11G11B10_FLOAT,
+        ]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut blend = blending(true);
+        blend.RenderTarget[1].BlendEnable = false.into();
+        let targets = target_formats(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut targets = target_formats(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        targets.RTFormats[1] = DXGI_FORMAT_R8_UINT;
+        assert_eq!(host_blend(&blending(false), &targets), blending(false));
+    }
+
 }

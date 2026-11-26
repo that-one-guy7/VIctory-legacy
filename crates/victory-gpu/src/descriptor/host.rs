@@ -1646,6 +1646,13 @@ fn buffer_uav(
     }
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { &mut desc.Anonymous.Buffer };
+    if buffer.StructureByteStride == 0
+        && buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 == 0
+        && !typed_store(desc.Format.0 as u32)
+    {
+        once!(format = desc.Format.0, "an unordered buffer view in a format the host cannot store");
+        return None;
+    }
     let element = if buffer.StructureByteStride > 0 {
         u64::from(buffer.StructureByteStride)
     } else if buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0 {
@@ -1702,6 +1709,33 @@ fn buffer_uav(
     Some(Some(shadow.buffer.clone()))
 }
 
+/// Whether the host stores to typed unordered views of `format`.
+fn typed_store(format: u32) -> bool {
+    static KNOWN: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, ok)) = known.iter().find(|(f, _)| *f == format) {
+        return ok;
+    }
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: DXGI_FORMAT(format as i32),
+        ..Default::default()
+    };
+    let ok = host().is_some_and(|h| {
+        // SAFETY: a plain feature query into a struct of its declared size.
+        unsafe {
+            h.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of_val(&support) as u32,
+            )
+        }
+        .is_ok()
+            && support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0
+    });
+    known.push((format, ok));
+    ok
+}
+
 /// Whether the host can make a shader (or unordered access) view of
 /// `texture` in `format` (none: the texture's own). The console allows any
 /// view; the host refuses (and removes the device for) views without the
@@ -1744,11 +1778,19 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
     }
     let view = format.as_ref().map_or(0, |f| f.0 as u32);
     if view == 0 {
+        if unordered && !typed_store(own) {
+            once!(own, "an unordered view in a format the host cannot store");
+            return false;
+        }
         return !typeless;
     }
     // A view of a target whose format the host refuses, in the title's
     // format: in the stand-in the host copy has.
     if view != own && crate::resource::target_format(view) == own {
+        if unordered && !typed_store(own) {
+            once!(own, "an unordered view in a format the host cannot store");
+            return false;
+        }
         if let Some(format) = format {
             *format = d.Format;
         }
@@ -1756,6 +1798,13 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
     }
     if family(view) != family(own) {
         once!(view, own, "view format of another family");
+        return false;
+    }
+    // A typed resource uses its own format unless the host resource is
+    // typeless. In that case the view's format is the one the host stores.
+    let host_format = if typeless { view } else { own };
+    if unordered && !typed_store(host_format) {
+        once!(view, own, "an unordered view in a format the host cannot store");
         return false;
     }
     if let Some(format) = format
@@ -1833,6 +1882,66 @@ fn twin_uav(
     Some(desc)
 }
 
+/// Shift and clamp a guest mip window to a host texture with omitted top mips.
+fn adjust_mips(most:&mut u32,levels:&mut u32,drop:u32,host_mips:u32){
+    if drop==0||host_mips==0{return;}
+    let old=*most;
+    if old>=drop{
+        let shifted=old-drop;
+        if shifted>=host_mips{*most=host_mips-1;if *levels!=u32::MAX{*levels=1;}return;}
+        *most=shifted;
+        if *levels!=u32::MAX{*levels=(*levels).min(host_mips-shifted).max(1);}
+    }else{
+        *most=0;
+        if *levels!=u32::MAX{*levels=(*levels).saturating_sub(drop-old).min(host_mips).max(1);}
+    }
+}
+fn adjust_srv_window(most:&mut u32,levels:&mut u32,lod:&mut f32,drop:u32,host_mips:u32){
+    adjust_mips(most,levels,drop,host_mips);
+    if *lod>0.0{*lod=(*lod-drop as f32).max(0.0);}
+}
+fn adjust_srv_for_dropped_mips(desc:&mut D3D12_SHADER_RESOURCE_VIEW_DESC,drop:u32,host_mips:u32){
+    if drop==0||host_mips==0{return;}
+    match desc.ViewDimension{
+        D3D12_SRV_DIMENSION_TEXTURE1D=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.Texture1D};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE1DARRAY=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.Texture1DArray};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE2D=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.Texture2D};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE2DARRAY=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.Texture2DArray};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE3D=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.Texture3D};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURECUBE=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.TextureCube};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        D3D12_SRV_DIMENSION_TEXTURECUBEARRAY=>{
+            // SAFETY: ViewDimension selects the active union member.
+            let t=unsafe{&mut desc.Anonymous.TextureCubeArray};
+            adjust_srv_window(&mut t.MostDetailedMip,&mut t.MipLevels,&mut t.ResourceMinLODClamp,drop,host_mips);
+        }
+        _=>{}
+    }
+}
+
 /// Makes the host descriptor for `view` at `at`: the host resource it
 /// views, or `None` if it cannot.
 fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
@@ -1884,9 +1993,12 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                         }
                     }
                 }
-                let mut desc = desc.as_ref().map(srv_desc);
-                if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
-                    return None;
+                let mut desc=desc.as_ref().map(srv_desc);
+                if !fits(texture,desc.as_mut().map(|d|&mut d.Format),false){return None;}
+                if let (Some(copy),Some(desc))=(crate::resource::host_copy(resource),desc.as_mut())
+                    && copy.mip_drop>0
+                {
+                    adjust_srv_for_dropped_mips(desc,u32::from(copy.mip_drop),copy.host_mips());
                 }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
@@ -2212,6 +2324,16 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn mip_dropped_srv_windows_are_rebased_and_clamped(){
+        let mut most=1;let mut levels=3;adjust_mips(&mut most,&mut levels,2,5);assert_eq!((most,levels),(0,2));
+        let mut most=3;let mut levels=2;adjust_mips(&mut most,&mut levels,2,5);assert_eq!((most,levels),(1,2));
+        let mut most=1;let mut levels=u32::MAX;adjust_mips(&mut most,&mut levels,2,5);assert_eq!((most,levels),(0,u32::MAX));
+        let mut most=0;let mut levels=2;let mut lod=3.5;adjust_srv_window(&mut most,&mut levels,&mut lod,2,5);
+        assert_eq!((most,levels),(0,1));assert_eq!(lod,1.5);
+    }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.
