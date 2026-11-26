@@ -2489,6 +2489,52 @@ mod tests {
         assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, mip_levels: 2, ..base }, 0.5, 512), None);
         assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, ..base }, 0.5, 1025), None);
         assert_eq!(scaled_render_target_extent(&ResourceDesc { flags: 1, ..base }, 1.0, 512), None);
+
+        // Fractional scales round down so the host allocation never exceeds
+        // the requested fraction, including odd source dimensions.
+        let odd = texture(1919, 1079, 28, 1);
+        assert_eq!(
+            scaled_render_target_extent(&ResourceDesc { flags: 1, ..odd }, 0.75, 512),
+            Some((1439, 809))
+        );
+        assert_eq!(
+            scaled_render_target_extent(&ResourceDesc { flags: 1, ..odd }, 0.5, 512),
+            Some((959, 539))
+        );
+        assert_eq!(
+            scaled_render_target_extent(&ResourceDesc { flags: 1, ..odd }, 0.25, 512),
+            Some((479, 269))
+        );
+
+        // The minimum is inclusive; unsupported scales fail closed.
+        let at_minimum = texture(512, 512, 28, 1);
+        assert_eq!(
+            scaled_render_target_extent(
+                &ResourceDesc { flags: 1, ..at_minimum },
+                0.5,
+                512
+            ),
+            Some((256, 256))
+        );
+        for invalid_scale in [0.0, 0.249, 1.001, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                scaled_render_target_extent(
+                    &ResourceDesc { flags: 1, ..base },
+                    invalid_scale,
+                    512
+                ),
+                None,
+                "scale {invalid_scale:?} must be rejected"
+            );
+        }
+
+        let mut array = ResourceDesc { flags: 1, ..base };
+        array.depth_or_array_size = 6;
+        assert_eq!(
+            scaled_render_target_extent(&array, 0.5, 512),
+            Some((1024, 512)),
+            "2D array slices retain their slice count while dimensions scale"
+        );
     }
 
     fn heap(size: u64) -> This {
