@@ -851,6 +851,19 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             crate::resource::host_resource(src),
         ) {
             if unlike(dst,src){return;}
+            let dst_scale = crate::resource::host_render_scale(dst);
+            let src_scale = crate::resource::host_render_scale(src);
+            if (dst_scale.0 - src_scale.0).abs() > 0.0001
+                || (dst_scale.1 - src_scale.1).abs() > 0.0001
+            {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| tracing::warn!(
+                    ?dst_scale,
+                    ?src_scale,
+                    "CopyResource skipped because render-target scales differ"
+                ));
+                return;
+            }
             let host_dst=crate::resource::host_copy(dst);
             let host_src=crate::resource::host_copy(src);
             if let (Some(hd),Some(hs))=(host_dst.as_ref(),host_src.as_ref())&&hd.mip_drop!=hs.mip_drop{
@@ -1013,6 +1026,36 @@ extern "system" fn copy_texture_region(
         if unlike(dst.resource, src.resource) {
             return;
         }
+        let dst_scale = crate::resource::host_render_scale(dst.resource);
+        let src_scale = if src.kind == FOOTPRINT {
+            (1.0, 1.0)
+        } else {
+            crate::resource::host_render_scale(src.resource)
+        };
+        if src.kind == FOOTPRINT && (dst_scale.0 < 0.9999 || dst_scale.1 < 0.9999) {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!("buffer-to-texture copy skipped for a render-scaled target"));
+            return;
+        }
+        if src.kind != FOOTPRINT
+            && ((dst_scale.0 - src_scale.0).abs() > 0.0001
+                || (dst_scale.1 - src_scale.1).abs() > 0.0001)
+        {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!(
+                ?dst_scale,
+                ?src_scale,
+                "CopyTextureRegion skipped because render-target scales differ"
+            ));
+            return;
+        }
+        let scale_u32 = |value: u32, scale: f32, upper: bool| {
+            let scaled = f64::from(value) * f64::from(scale);
+            let rounded = if upper { scaled.ceil() } else { scaled.floor() };
+            rounded.clamp(0.0, f64::from(u32::MAX)) as u32
+        };
+        let host_x = scale_u32(x, dst_scale.0, false);
+        let host_y = scale_u32(y, dst_scale.1, false);
         let mut from = src;
         let _upload; // keeps the source alive while this call records it
         #[cfg(feature = "diagnostics")]
@@ -1060,7 +1103,17 @@ extern "system" fn copy_texture_region(
         list.twin_use(dst.resource,false,true);
         ensure_state(list,dst.resource,COPY_DEST);
         to_location.resource=to.as_raw().cast_const().cast();
-        let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
+        let source_box_value = (!source_box.is_null())
+            .then(|| unsafe { source_box.cast::<D3D12_BOX>().read_unaligned() });
+        let host_box_value = source_box_value.map(|box_| D3D12_BOX {
+            left: scale_u32(box_.left, src_scale.0, false),
+            top: scale_u32(box_.top, src_scale.1, false),
+            front: box_.front,
+            right: scale_u32(box_.right, src_scale.0, true),
+            bottom: scale_u32(box_.bottom, src_scale.1, true),
+            back: box_.back,
+        });
+        let host_box = host_box_value.as_ref().map(std::ptr::from_ref);
         #[cfg(feature = "diagnostics")]
         {
             let text = || {
@@ -1090,8 +1143,8 @@ extern "system" fn copy_texture_region(
         unsafe {
             list.list.CopyTextureRegion(
                 (&raw const to_location).cast(),
-                x,
-                y,
+                host_x,
+                host_y,
                 z,
                 (&raw const from).cast(),
                 host_box,
@@ -1134,6 +1187,10 @@ fn read_back(
     let bytes = pitch * (rows - 1) + row;
     let data = buffer_range(dst.resource, dst.footprint.offset, bytes).ok_or("a destination outside its buffer")?;
     let texture=crate::resource::host_resource(src.resource).ok_or("no host texture")?;
+    let render_scale = crate::resource::host_render_scale(src.resource);
+    if render_scale.0 < 0.9999 || render_scale.1 < 0.9999 {
+        return Err("read-back of a render-scaled target is not supported");
+    }
     let src_copy=crate::resource::host_copy(src.resource).ok_or("no host texture metadata")?;
     let src_sub=src_copy.host_subresource(src.footprint.offset as u32).ok_or("source mip was dropped")?;
     let buffer=host.read_back_buffer(size).ok_or("no read-back buffer")?;
@@ -1207,6 +1264,19 @@ extern "system" fn resolve(
         const RESOLVE_DEST: u32 = 0x1000;
         const RESOLVE_SOURCE: u32 = 0x2000;
         if unlike(dst,src){return;}
+        let dst_scale = crate::resource::host_render_scale(dst);
+        let src_scale = crate::resource::host_render_scale(src);
+        if (dst_scale.0 - src_scale.0).abs() > 0.0001
+            || (dst_scale.1 - src_scale.1).abs() > 0.0001
+        {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!(
+                ?dst_scale,
+                ?src_scale,
+                "resolve skipped because render-target scales differ"
+            ));
+            return;
+        }
         let (Some(dst_copy),Some(src_copy))=(crate::resource::host_copy(dst),crate::resource::host_copy(src))else{return;};
         let (Some(dst_sub),Some(src_sub))=(dst_copy.host_subresource(dst_sub),src_copy.host_subresource(src_sub))else{return;};
         list.twin_use(dst,false,true);list.twin_use(src,false,false);
@@ -1255,6 +1325,25 @@ pub(crate) struct Rect {
     bottom: i32,
 }
 
+#[cfg(windows)]
+fn scaled_clear_rectangles(resource: This, rects: &[Rect]) -> Option<Vec<Rect>> {
+    let (sx, sy) = crate::resource::host_render_scale(resource);
+    if sx >= 0.9999 && sy >= 0.9999 {
+        return None;
+    }
+    let coordinate = |value: i32, scale: f32, upper: bool| {
+        let scaled = f64::from(value) * f64::from(scale);
+        let rounded = if upper { scaled.ceil() } else { scaled.floor() };
+        rounded.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    };
+    Some(rects.iter().map(|rect| Rect {
+        left: coordinate(rect.left, sx, false),
+        top: coordinate(rect.top, sy, false),
+        right: coordinate(rect.right, sx, true),
+        bottom: coordinate(rect.bottom, sy, true),
+    }).collect())
+}
+
 extern "system" fn clear_rtv(
     this: This,
     handle: u64,
@@ -1282,6 +1371,10 @@ extern "system" fn clear_rtv(
             // SAFETY: the title passes `count` rectangles, laid out as the host's.
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
+        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
+        let rects = scaled_rects.as_deref().or(rects.as_deref());
+        let scaled_rects = rects.as_ref().and_then(|rects| scaled_clear_rectangles(record.resource, rects));
+        let rects = scaled_rects.as_deref().or(rects.as_deref());
         const RENDER_TARGET: u32 = 0x4;
         let rtv = host.rtv(Some(texture), record.desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
