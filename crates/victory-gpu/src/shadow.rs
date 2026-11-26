@@ -217,7 +217,7 @@ fn card_for(size: u64) -> Option<ID3D12Resource> {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
         return None;
     }
-    let buffer = host.uav_buffer(size);
+    let buffer = host.optional_uav_buffer(size);
     if buffer.is_none() {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
     }
@@ -272,7 +272,7 @@ fn window_card_for(size: u64) -> Option<ID3D12Resource> {
         WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed);
         return None;
     }
-    let buffer = host.uav_buffer(size);
+    let buffer = host.optional_uav_buffer(size);
     if buffer.is_none() {
         WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed);
     }
