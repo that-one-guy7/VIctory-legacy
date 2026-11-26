@@ -73,8 +73,11 @@ unless a process-level value is already set:
   requesting local allocations at 70% of the DXGI budget (the general
   default remains 85%). Required mesh scratch and indirect-argument buffers
   are not denied by this optional-allocation gate.
-- `VICTORY_RENDER_SCALE=0.5`: eligible host-side render/depth targets use
-  half width and height (one quarter of the pixels).
+- `VICTORY_RENDER_SCALE=1.0`: keep host render/depth targets at native
+  dimensions. The latest GTX 1050 Ti log showed a `CopyResource` being skipped
+  because one target was at 0.5 scale while the other remained at 1.0. Keep
+  target scaling opt-in until the wrapper can safely handle those mixed-scale
+  copy dependencies.
 - `VICTORY_TEXTURE_MIP_DROP=2`: eligible large sampled textures omit their
   top two mip levels on the host copy.
 
