@@ -5976,7 +5976,6 @@ impl<'a> Lower<'a> {
     }
 
     /// `s_load_dword*` from the program's constant table.
-
     fn code_smem(&mut self, inst: &Inst, a: Address) -> Result<(), Why> {
         let Fields::Smem {
             data: Some(Operand::Scalar { code, .. }),
