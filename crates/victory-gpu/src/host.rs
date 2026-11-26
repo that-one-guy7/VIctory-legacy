@@ -3212,7 +3212,7 @@ impl Host {
         let mut whole: Vec<Arc<crate::shadow::Shadow>> = Vec::new();
         for (shadow, _) in &declared {
             if shadow.card_make_before(|size| {
-                let before = self.uav_buffer(crate::shadow::card_hash_bytes(size))?;
+                let before = self.optional_uav_buffer(crate::shadow::card_hash_bytes(size))?;
                 name(&before, || "title buffer on the card, hashes of its pieces".into());
                 Some(before)
             }) {
