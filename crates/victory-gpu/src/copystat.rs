@@ -847,11 +847,13 @@ fn log_memory() {
     );
     let mesh = crate::host::mesh_scratch_stats();
     tracing::info!(
-        "mesh fallback scratch alive: {} local buffers {:.0} MB, {} shared-memory buffers {:.0} MB",
+        "mesh fallback scratch alive: {} local buffers {:.0} MB, {} shared-memory buffers {:.0} MB ({} cached spare buffers {:.0} MB)",
         mesh[0],
         mb(mesh[1]),
         mesh[2],
         mb(mesh[3]),
+        mesh[4],
+        mb(mesh[5]),
     );
     // Round 3: whether windows hold the same memory more than once (they
     // can, once they are cut finer than 4 MiB), and how many host lists

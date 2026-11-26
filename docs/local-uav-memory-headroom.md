@@ -63,12 +63,21 @@ unless a process-level value is already set:
 
 - `VICTORY_MESH_LOCAL_BUDGET_MB=128`: limits retained local mesh scratch to
   128 MiB; new scratch beyond the limit uses CPU-visible shared memory.
+- `VICTORY_MESH_SHARED_SPARE_MB=128`: after a list's submission finishes,
+  its shared-memory mesh scratch chunks are returned to one process-wide
+  reuse cache. The cache evicts old chunks over 128 MiB, releasing their
+  system RAM. This avoids every long-lived host list retaining a private
+  collection of shared chunks. Scratch concurrently needed by one submission
+  is not capped by this idle-cache limit.
 - `VICTORY_LOCAL_UAV_BUDGET_PERCENT=70`: optional UAV optimizations stop
   requesting local allocations at 70% of the DXGI budget (the general
   default remains 85%). Required mesh scratch and indirect-argument buffers
   are not denied by this optional-allocation gate.
-- `VICTORY_RENDER_SCALE=0.5`: eligible host-side render/depth targets use
-  half width and height (one quarter of the pixels).
+- `VICTORY_RENDER_SCALE=1.0`: keep host render/depth targets at native
+  dimensions. The latest GTX 1050 Ti log showed a `CopyResource` being skipped
+  because one target was at 0.5 scale while the other remained at 1.0. Keep
+  target scaling opt-in until the wrapper can safely handle those mixed-scale
+  copy dependencies.
 - `VICTORY_TEXTURE_MIP_DROP=2`: eligible large sampled textures omit their
   top two mip levels on the host copy.
 

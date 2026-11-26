@@ -25,6 +25,15 @@ This is an early experiment, not a verified low-resolution mode. GPU copies betw
 
 Do not treat a successful build or a non-black frame as proof of correctness. Compare the same scene with the option disabled and enabled, inspect the log for `reducing render-target resolution` and any skipped-copy warnings, and verify that depth, shadows, UI and post-processing remain present.
 
+## Low-VRAM profile note
+
+The automatic `VICTORY_MESH_FALLBACK=1` profile leaves this feature disabled
+(`VICTORY_RENDER_SCALE=1.0`). A GTX 1050 Ti runtime log showed a
+`CopyResource` skipped because the source and destination targets had
+different scales. Until mixed-scale copy paths can be converted safely, keep
+render-target scaling opt-in and verify the same scene for skipped-copy
+warnings whenever testing a value below 1.0.
+
 ## Test
 
 From the repository root on Windows:

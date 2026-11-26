@@ -1370,6 +1370,13 @@ static MESH_SHARED_POOL_BYTES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static MESH_SHARED_POOL_BUFFERS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// Shared-memory mesh chunks no command list currently owns. These are reusable
+/// only after the owning list's submission has finished and its pool resets.
+static MESH_SHARED_SPARE: Mutex<Vec<MeshChunk>> = Mutex::new(Vec::new());
+static MESH_SHARED_SPARE_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_SHARED_SPARE_BUFFERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) struct ScratchRegion {
     pub(crate) buffer: ID3D12Resource,
@@ -1387,6 +1394,70 @@ impl Drop for MeshChunk {
             MESH_SHARED_POOL_BUFFERS.fetch_sub(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Maximum shared-memory mesh scratch kept idle for reuse by another list.
+/// The low-VRAM launcher profile sets this to 128 MiB; a larger value can be
+/// selected on machines with more physical RAM.
+fn mesh_shared_spare_limit() -> u64 {
+    static LIMIT: OnceLock<u64> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_MESH_SHARED_SPARE_MB")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&mb| mb <= 4096)
+            .and_then(|mb| mb.checked_mul(1 << 20))
+            .unwrap_or(256 << 20)
+    })
+}
+
+/// Whether returning a chunk would exceed the bounded idle cache.
+fn mesh_spare_would_exceed(kept: u64, incoming: u64, limit: u64) -> bool {
+    incoming > limit || kept > limit.saturating_sub(incoming)
+}
+
+/// Takes an exact-size shared chunk from the idle cache. Such chunks remain
+/// in UAV state; the new owner therefore does not issue a COMMON-to-UAV barrier.
+fn take_mesh_shared_spare(size: u64) -> Option<MeshChunk> {
+    let mut spare = MESH_SHARED_SPARE.lock().unwrap_or_else(|e| e.into_inner());
+    let at = spare.iter().rposition(|chunk| !chunk.local && chunk.size == size)?;
+    let mut chunk = spare.swap_remove(at);
+    MESH_SHARED_SPARE_BYTES.fetch_sub(chunk.size, Ordering::Relaxed);
+    MESH_SHARED_SPARE_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+    chunk.used = 0;
+    chunk.touched = true;
+    Some(chunk)
+}
+
+/// Returns a completed shared scratch chunk to the bounded cache, evicting
+/// cached chunks as needed. Dropped chunks release their system RAM.
+fn give_mesh_shared_spare(mut chunk: MeshChunk) {
+    if chunk.local || !chunk.touched {
+        return;
+    }
+    chunk.used = 0;
+    let size = chunk.size;
+    let limit = mesh_shared_spare_limit();
+    if size > limit {
+        return;
+    }
+    let mut spare = MESH_SHARED_SPARE.lock().unwrap_or_else(|e| e.into_inner());
+    while mesh_spare_would_exceed(
+        MESH_SHARED_SPARE_BYTES.load(Ordering::Relaxed),
+        size,
+        limit,
+    ) {
+        if spare.is_empty() {
+            return;
+        }
+        let oldest = spare.swap_remove(0);
+        MESH_SHARED_SPARE_BYTES.fetch_sub(oldest.size, Ordering::Relaxed);
+        MESH_SHARED_SPARE_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        drop(oldest);
+    }
+    MESH_SHARED_SPARE_BYTES.fetch_add(size, Ordering::Relaxed);
+    MESH_SHARED_SPARE_BUFFERS.fetch_add(1, Ordering::Relaxed);
+    spare.push(chunk);
 }
 
 impl Pool {
@@ -1430,26 +1501,31 @@ impl Pool {
                 }
                 at = first;
             } else {
-                if self.failed.contains(&size) {
-                    return None;
-                }
-                let Some((buffer, local)) = make(size) else {
-                    self.failed.insert(size);
-                    return None;
-                };
-                if local {
-                    MESH_LOCAL_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                let chunk = if let Some(chunk) = take_mesh_shared_spare(size) {
+                    chunk
                 } else {
-                    MESH_SHARED_POOL_BYTES.fetch_add(size, Ordering::Relaxed);
-                    MESH_SHARED_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
-                }
-                self.chunks.push(MeshChunk {
-                    buffer,
-                    size,
-                    used: 0,
-                    touched: false,
-                    local,
-                });
+                    if self.failed.contains(&size) {
+                        return None;
+                    }
+                    let Some((buffer, local)) = make(size) else {
+                        self.failed.insert(size);
+                        return None;
+                    };
+                    if local {
+                        MESH_LOCAL_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        MESH_SHARED_POOL_BYTES.fetch_add(size, Ordering::Relaxed);
+                        MESH_SHARED_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    MeshChunk {
+                        buffer,
+                        size,
+                        used: 0,
+                        touched: false,
+                        local,
+                    }
+                };
+                self.chunks.push(chunk);
             }
         }
         self.current = at;
@@ -1465,10 +1541,20 @@ impl Pool {
     }
 
     fn reset(&mut self) {
-        for chunk in &mut self.chunks {
+        let mut local = Vec::with_capacity(self.chunks.len());
+        for mut chunk in self.chunks.drain(..) {
             chunk.used = 0;
-            chunk.touched = false;
+            if chunk.local {
+                // Keep the bounded local-VRAM pool with this list, as before.
+                chunk.touched = false;
+                local.push(chunk);
+            } else {
+                // A completed submission leaves shared mesh scratch in UAV state.
+                // Return it to the process-wide cache for another list to reuse.
+                give_mesh_shared_spare(chunk);
+            }
         }
+        self.chunks = local;
         self.current = 0;
         self.failed.clear();
     }
@@ -6564,12 +6650,14 @@ fn reserve_mesh_local_pool(size: u64, limit: u64) -> bool {
 /// count/bytes. Exposed to diagnostics so hardware runs can confirm which
 /// scratch path was actually used.
 #[cfg(feature = "diagnostics")]
-pub(crate) fn mesh_scratch_stats() -> [u64; 4] {
+pub(crate) fn mesh_scratch_stats() -> [u64; 6] {
     [
         MESH_LOCAL_POOL_BUFFERS.load(Ordering::Relaxed),
         MESH_LOCAL_POOL_BYTES.load(Ordering::Relaxed),
         MESH_SHARED_POOL_BUFFERS.load(Ordering::Relaxed),
         MESH_SHARED_POOL_BYTES.load(Ordering::Relaxed),
+        MESH_SHARED_SPARE_BUFFERS.load(Ordering::Relaxed),
+        MESH_SHARED_SPARE_BYTES.load(Ordering::Relaxed),
     ]
 }
 
@@ -6936,6 +7024,25 @@ mod local_uav_budget {
     #[test]
     fn unavailable_budget_does_not_block_allocations() {
         assert!(local_uav_budget_allows_percent(0, u64::MAX, u64::MAX, 70));
+    }
+}
+
+#[cfg(test)]
+mod mesh_shared_spare_tests {
+    use super::mesh_spare_would_exceed;
+
+    #[test]
+    fn idle_shared_scratch_cache_obeys_its_byte_limit() {
+        const MIB: u64 = 1 << 20;
+        let limit = 128 * MIB;
+        assert!(!mesh_spare_would_exceed(96 * MIB, 32 * MIB, limit));
+        assert!(mesh_spare_would_exceed(97 * MIB, 32 * MIB, limit));
+        assert!(mesh_spare_would_exceed(0, 129 * MIB, limit));
+    }
+
+    #[test]
+    fn zero_limit_disables_idle_shared_scratch_retention() {
+        assert!(mesh_spare_would_exceed(0, 1, 0));
     }
 }
 
