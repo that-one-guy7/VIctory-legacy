@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45727502203](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45727502203) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `d213703`. Physical-GPU/image-equivalence validation remains outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45728150342](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45728150342) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `1e3bdcf`. Physical-GPU/image-equivalence validation remains outstanding.**
 
 ## Why this work is needed
 
@@ -381,10 +381,14 @@ The renderer still has substantial correctness failures:
   These PSO failures are a direct reason mesh draws are unavailable. This
   Release log did not enable the D3D12 debug layer, so it does not contain the
   InfoQueue explanation for the rejected compute PSOs.
-- The host view heap reaches its one-million-descriptor cap while the title
-  asks for index 1,245,184. Descriptors beyond the cap resolve as null. This
-  can remove textures/views from draws. The reference repository has the same
-  one-million cap; raising it blindly is unsafe on this NVIDIA path.
+- The title requested a view heap with 1,245,184 entries. The NVIDIA host
+  could not create a shader-visible view heap above one million descriptors,
+  so the fallback heap reserves 262,144 dynamic per-draw slots and mirrors
+  title descriptors in the remaining 737,855 slots. The log did **not** emit
+  the separate `title slot past the host heap` warning, so this cap is a
+  compatibility limit to watch, not proof that this run actually read an
+  out-of-range title descriptor. Raising the heap limit blindly is unsafe on
+  this NVIDIA path.
 - The log reports 310 `0x8007000E` out-of-memory failures, 147 missing-host-
   texture events, 13 upload-buffer allocation failures, and eight
   `0x887A0005` device-suspended errors. It also records an unordered placed
