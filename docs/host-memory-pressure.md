@@ -41,3 +41,14 @@ The next GTX 1050 Ti run still needs the diagnostics build and its D3D12 debug
 layer enabled. Check the new pressure-transition, staging-deferral, sweep, and
 `Close` messages together with the DRED command-list name. Shader translation
 refusals and the descriptor heap limit remain separate scene-rendering issues.
+
+## Failed command-list Close behavior
+
+A failed host command-list `Close()` is now returned through the title's
+COM method as the original HRESULT instead of invoking the wrapper's fatal
+panic path. The rejected host list is marked and filtered out before
+`ExecuteCommandLists`; this prevents D3D12 from receiving a list it rejected.
+If the title continues after the HRESULT, unaffected lists can still submit.
+A failed part created at an internal wait is remembered and returned by the
+title list's next `Close()`. The patch does not replay the rejected commands:
+that would require re-recording the title's draw stream.
