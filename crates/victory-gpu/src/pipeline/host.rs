@@ -539,19 +539,7 @@ impl HostPipeline {
                         // reads (and a root UAV's writes), which a root
                         // descriptor leaves unbounded.
                         // (Our own table of strides stays a descriptor.)
-                        ranges.push(Box::new(D3D12_DESCRIPTOR_RANGE1 {
-                            RangeType: if uav {
-                                D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-                            } else {
-                                D3D12_DESCRIPTOR_RANGE_TYPE_SRV
-                            },
-                            NumDescriptors: 1,
-                            BaseShaderRegister: u32::from(slot),
-                            RegisterSpace: ROOT_CBV_SPACE,
-                            Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
-                                | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-                            OffsetInDescriptorsFromTableStart: 0,
-                        }));
+                        ranges.push(Box::new(root_view_range(uav, slot, shift)));
                         let range: *const D3D12_DESCRIPTOR_RANGE1 = &**ranges.last()?;
                         out.push((slot, params.len() as u32));
                         params.push(D3D12_ROOT_PARAMETER1 {
@@ -1085,6 +1073,25 @@ fn code_bytes(code: &D3D12_SHADER_BYTECODE) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(code.pShaderBytecode.cast::<u8>(), code.BytecodeLength) }.to_vec()
 }
 
+/// A bounded table for one title root view. Mesh fallback shader bindings are
+/// shifted into a separate register space, so the descriptor range must move
+/// with the corresponding root descriptors, user data, and samplers.
+fn root_view_range(uav: bool, slot: u8, shift: u32) -> D3D12_DESCRIPTOR_RANGE1 {
+    D3D12_DESCRIPTOR_RANGE1 {
+        RangeType: if uav {
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+        } else {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+        },
+        NumDescriptors: 1,
+        BaseShaderRegister: u32::from(slot),
+        RegisterSpace: ROOT_CBV_SPACE + shift,
+        Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
+            | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        OffsetInDescriptorsFromTableStart: 0,
+    }
+}
+
 fn root_signature(
     device: &ID3D12Device,
     params: &[D3D12_ROOT_PARAMETER1],
@@ -1215,6 +1222,30 @@ mod tests {
         assert!(
             super::super::library::LOADED.load(Ordering::Relaxed) > loaded,
             "the mesh pipeline was compiled again instead of loaded from the library"
+        );
+    }
+
+    #[test]
+    fn root_view_ranges_follow_mesh_compute_register_space_shift() {
+        let ordinary = root_view_range(false, 2, 0);
+        assert_eq!(ordinary.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+        assert_eq!(ordinary.BaseShaderRegister, 2);
+        assert_eq!(ordinary.RegisterSpace, ROOT_CBV_SPACE);
+
+        let fallback_srv = root_view_range(false, 3, MESH_COMPUTE_SPACES);
+        assert_eq!(fallback_srv.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+        assert_eq!(fallback_srv.BaseShaderRegister, 3);
+        assert_eq!(
+            fallback_srv.RegisterSpace,
+            ROOT_CBV_SPACE + MESH_COMPUTE_SPACES
+        );
+
+        let fallback_uav = root_view_range(true, 1, MESH_COMPUTE_SPACES);
+        assert_eq!(fallback_uav.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_UAV);
+        assert_eq!(fallback_uav.BaseShaderRegister, 1);
+        assert_eq!(
+            fallback_uav.RegisterSpace,
+            ROOT_CBV_SPACE + MESH_COMPUTE_SPACES
         );
     }
 
