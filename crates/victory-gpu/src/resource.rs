@@ -647,6 +647,46 @@ fn mip_count(desc: &ResourceDesc) -> u32 {
     }
 }
 
+/// Maps a console subresource to its host counterpart after top mip levels
+/// have been omitted. Dropped mips have no host subresource.
+pub(crate) fn map_subresource(guest_sub:u32,guest_mips:u32,drop:u32)->Option<u32>{
+    if drop==0||guest_mips==0{return Some(guest_sub);}
+    let slice=guest_sub/guest_mips;
+    let guest_mip=guest_sub%guest_mips;
+    if guest_mip<drop{return None;}
+    let host_mips=guest_mips.saturating_sub(drop).max(1);
+    slice.checked_mul(host_mips)?.checked_add(guest_mip-drop)
+}
+
+/// Only large, power-of-two, single-sample, 2D sampled textures may lose top mips.
+fn compute_mip_drop_explicit(desc:&ResourceDesc,requested:u32,min_size:u64)->u32{
+    if requested==0||desc.dimension!=3||desc.flags&0x7!=0||desc.sample_count>1
+        ||!desc.width.is_power_of_two()||!desc.height.is_power_of_two()
+        ||desc.width<min_size||u64::from(desc.height)<min_size{return 0;}
+    let Some(layout)=texture_layout(desc) else{return 0;};
+    if layout.planes[0].layout.desc.swizzle.xor(){return 0;}
+    let total_mips=mip_count(desc);
+    let block=element(pc_format(desc.format)).map_or(1,|(_,block)|block);
+    let mut drop=requested.min(3);
+    while drop>0{
+        let width=desc.width>>drop;
+        let height=u64::from(desc.height)>>drop;
+        if total_mips>drop+1&&width>0&&height>0
+            &&(block<=1||(width>=block&&height>=block&&width.is_multiple_of(block)&&height.is_multiple_of(block))){
+            return drop;
+        }
+        drop-=1;
+    }
+    0
+}
+
+#[cfg(windows)]
+fn compute_mip_drop(desc:&ResourceDesc)->u32{
+    compute_mip_drop_explicit(desc,crate::texture::texture_mip_drop(),
+        crate::texture::texture_mip_drop_min_size())
+}
+
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PlacedFootprint {
@@ -659,6 +699,11 @@ pub(crate) struct PlacedFootprint {
 }
 
 impl PlacedFootprint {
+    /// An index-only subresource location in CopyLocation's compatibility layout.
+    #[cfg(windows)]
+    pub(crate) const fn subresource(index:u32)->Self{
+        Self{offset:index as u64,format:0,width:0,height:0,depth:0,row_pitch:0}
+    }
     /// The bytes it spans in a buffer: every row pitched but the last.
     pub(crate) fn bytes(&self) -> Option<u64> {
         let (element, block) = element(self.format)?;
@@ -1125,6 +1170,9 @@ pub(crate) struct HostTexture {
     /// Whether its contents come from title memory ([`fills`]): counted in
     /// [`KINDS`] while it lives.
     filled: bool,
+    /// Original guest mip count and number of top levels omitted on the host.
+    pub(crate) title_mips:u16,
+    pub(crate) mip_drop:u16,
 }
 
 /// What a title texture has on the host: its host copy and, for a depth
@@ -1303,7 +1351,17 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             .clear
             .as_ref()
             .map_or(std::ptr::null(), |c| std::ptr::from_ref(c).cast::<c_void>());
-        let Some(texture) = host_texture(&r.desc, r.host.state, clear) else {
+        let title_mips=mip_count(&r.desc).min(u32::from(u16::MAX)) as u16;
+        let mip_drop=compute_mip_drop(&r.desc).min(u32::from(title_mips)) as u16;
+        let mut host_desc=r.desc;
+        if mip_drop>0{
+            host_desc.width=(host_desc.width>>mip_drop).max(1);
+            host_desc.height=(u64::from(host_desc.height)>>mip_drop).max(1) as u32;
+            host_desc.mip_levels=title_mips.saturating_sub(mip_drop).max(1);
+            tracing::info!(resource=?this,mip_drop,width=host_desc.width,height=host_desc.height,
+                "reducing sampled texture resolution for the host GPU");
+        }
+        let Some(texture) = host_texture(&host_desc, r.host.state, clear) else {
             r.host.refused.store(true, Relaxed);
             return None;
         };
@@ -1321,6 +1379,8 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         }
         let state = crate::host::legal_state(&texture, crate::host::texture_state(r.host.state));
         let mut host = HostTexture::new(texture, state);
+        host.title_mips=title_mips;
+        host.mip_drop=mip_drop;
         host.filled = fills(&r.desc);
         if host.filled {
             KINDS[0].fetch_add(1, Relaxed);
@@ -1550,7 +1610,19 @@ impl HostTexture {
             state: std::sync::atomic::AtomicU32::new(state),
             bytes,
             filled: false,
+            title_mips:1,
+            mip_drop:0,
         }
+    }
+}
+
+#[cfg(windows)]
+impl HostTexture {
+    pub(crate) fn host_mips(&self)->u32{
+        u32::from(self.title_mips).saturating_sub(u32::from(self.mip_drop)).max(1)
+    }
+    pub(crate) fn host_subresource(&self,guest_sub:u32)->Option<u32>{
+        map_subresource(guest_sub,u32::from(self.title_mips),u32::from(self.mip_drop))
     }
 }
 
@@ -2280,6 +2352,36 @@ mod tests {
             layout: 0,
             ..buffer(0)
         }
+    }
+
+
+    #[test]
+    fn mip_drop_is_limited_to_large_sampled_textures(){
+        let sampled=texture(2048,2048,28,12);
+        assert_eq!(compute_mip_drop_explicit(&sampled,1,1024),1);
+        assert_eq!(compute_mip_drop_explicit(&sampled,2,1024),2);
+        assert_eq!(compute_mip_drop_explicit(&sampled,3,1024),3);
+        let mut target=sampled;target.flags=1;assert_eq!(compute_mip_drop_explicit(&target,1,1024),0);
+        let mut depth=sampled;depth.flags=2;assert_eq!(compute_mip_drop_explicit(&depth,1,1024),0);
+        let mut uav=sampled;uav.flags=4;assert_eq!(compute_mip_drop_explicit(&uav,1,1024),0);
+        let mut msaa=sampled;msaa.sample_count=4;assert_eq!(compute_mip_drop_explicit(&msaa,1,1024),0);
+        assert_eq!(compute_mip_drop_explicit(&texture(512,512,28,10),1,1024),0);
+        assert_eq!(compute_mip_drop_explicit(&texture(1920,1080,28,11),1,1024),0);
+        assert_eq!(compute_mip_drop_explicit(&buffer(2048),1,1024),0);
+        assert_eq!(compute_mip_drop_explicit(&texture(2048,2048,28,2),1,1024),0);
+        assert_eq!(compute_mip_drop_explicit(&texture(2048,2048,98,12),2,1024),2);
+    }
+
+    #[test]
+    fn mip_drop_subresources_skip_removed_levels_and_rebase_arrays(){
+        assert_eq!(map_subresource(0,8,2),None);
+        assert_eq!(map_subresource(1,8,2),None);
+        assert_eq!(map_subresource(2,8,2),Some(0));
+        assert_eq!(map_subresource(7,8,2),Some(5));
+        assert_eq!(map_subresource(8,8,2),None);
+        assert_eq!(map_subresource(10,8,2),Some(6));
+        assert_eq!(map_subresource(15,8,2),Some(11));
+        assert_eq!(map_subresource(5,8,0),Some(5));
     }
 
     fn heap(size: u64) -> This {

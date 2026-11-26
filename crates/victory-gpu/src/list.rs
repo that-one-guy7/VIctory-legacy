@@ -850,7 +850,14 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             crate::resource::host_resource(dst),
             crate::resource::host_resource(src),
         ) {
-            if unlike(dst, src) {
+            if unlike(dst,src){return;}
+            let host_dst=crate::resource::host_copy(dst);
+            let host_src=crate::resource::host_copy(src);
+            if let (Some(hd),Some(hs))=(host_dst.as_ref(),host_src.as_ref())&&hd.mip_drop!=hs.mip_drop{
+                if crate::texture::title_written(from){crate::texture::upload(list,src,from);}
+                list.twin_use(dst,false,true);list.twin_use(src,false,false);
+                ensure_state(list,dst,COPY_DEST);ensure_state(list,src,COPY_SOURCE);
+                let _=copy_overlapping_mips(list,dst,to,hd,src,from,hs);
                 return;
             }
             // A source the title fills itself is uploaded first (upstream
@@ -891,6 +898,57 @@ pub(crate) struct CopyLocation {
     resource: This,
     kind: u32,
     footprint: crate::resource::PlacedFootprint,
+}
+
+
+#[cfg(windows)]
+impl CopyLocation {
+    const fn subresource(resource:This,index:u32)->Self{
+        Self{resource,kind:0,footprint:crate::resource::PlacedFootprint::subresource(index)}
+    }
+}
+#[cfg(windows)]
+fn compatible_mip_drop_copy(a_fmt:u32,b_fmt:u32,a_dim:i32,b_dim:i32,a_samples:u32,b_samples:u32)->bool{
+    crate::resource::family(a_fmt)==crate::resource::family(b_fmt)&&a_dim==b_dim&&a_samples==b_samples
+}
+#[cfg(windows)]
+fn copy_overlapping_mips(
+    list:&crate::host::HostList,dst:This,to:&windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    hd:&crate::resource::HostTexture,src:This,from:&windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    hs:&crate::resource::HostTexture,
+)->bool{
+    use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    use windows::core::Interface;
+    let (a,b)=unsafe{(to.GetDesc(),from.GetDesc())};
+    if !compatible_mip_drop_copy(a.Format.0 as u32,b.Format.0 as u32,a.Dimension.0,b.Dimension.0,
+        a.SampleDesc.Count,b.SampleDesc.Count)||a.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D{
+        tracing::warn!(?dst,?src,"cannot copy textures with different mip-drop amounts");return false;
+    }
+    let slices=u32::from(a.DepthOrArraySize).min(u32::from(b.DepthOrArraySize)).max(1);
+    let start=u32::from(hd.mip_drop.max(hs.mip_drop));
+    let end=u32::from(hd.title_mips.min(hs.title_mips));
+    let to_raw=to.as_raw().cast_const().cast();
+    let from_raw=from.as_raw().cast_const().cast();
+    let mut copied=0u32;
+    for slice in 0..slices{
+        for guest_mip in start..end{
+            let Some(dst_sub)=hd.host_subresource(slice*u32::from(hd.title_mips)+guest_mip) else{continue};
+            let Some(src_sub)=hs.host_subresource(slice*u32::from(hs.title_mips)+guest_mip) else{continue};
+            let dst_mip=dst_sub%hd.host_mips();
+            let src_mip=src_sub%hs.host_mips();
+            let dst_size=((a.Width>>dst_mip).max(1),(u64::from(a.Height)>>dst_mip).max(1));
+            let src_size=((b.Width>>src_mip).max(1),(u64::from(b.Height)>>src_mip).max(1));
+            if dst_size!=src_size{continue;}
+            let to_loc=CopyLocation::subresource(to_raw,dst_sub);
+            let from_loc=CopyLocation::subresource(from_raw,src_sub);
+            crate::texture::host_written_subresource(dst,dst_sub);
+            #[cfg(feature="diagnostics")]
+            list.note_op(||format!("copy overlapping mip {guest_mip} ({src:?} sub {src_sub} -> {dst:?} sub {dst_sub})"));
+            unsafe{list.list.CopyTextureRegion((&raw const to_loc).cast(),0,0,0,(&raw const from_loc).cast(),None);}
+            copied+=1;
+        }
+    }
+    copied>0
 }
 
 /// Texture to texture on the GPU; buffer to texture through an upload
@@ -981,23 +1039,28 @@ extern "system" fn copy_texture_region(
             }
             _upload = buffer;
         } else {
-            let Some(texture) = crate::resource::host_resource(src.resource) else {
-                return;
-            };
-            list.twin_use(src.resource, false, false);
-            if crate::texture::title_written(texture) {
-                crate::texture::upload(list, src.resource, texture);
-            }
-            ensure_state(list, src.resource, COPY_SOURCE);
-            from.resource = texture.as_raw().cast_const().cast();
+            let Some(texture)=crate::resource::host_resource(src.resource)else{return;};
+            list.twin_use(src.resource,false,false);
+            if crate::texture::title_written(texture){crate::texture::upload(list,src.resource,texture);}
+            ensure_state(list,src.resource,COPY_SOURCE);
+            from.resource=texture.as_raw().cast_const().cast();
         }
-        // A depth texture shaders also write: what they wrote, first (the
-        // source above too).
-        list.twin_use(dst.resource, false, true);
-        ensure_state(list, dst.resource, COPY_DEST);
-        crate::texture::host_written(dst.resource);
-        let mut to_location = dst;
-        to_location.resource = to.as_raw().cast_const().cast();
+        let dst_copy=crate::resource::host_copy(dst.resource);
+        let src_copy=if src.kind!=FOOTPRINT{crate::resource::host_copy(src.resource)}else{None};
+        let mut to_location=dst;
+        if dst.kind!=FOOTPRINT&&let Some(copy)=dst_copy.as_ref(){
+            let Some(mapped)=copy.host_subresource(dst.footprint.offset as u32)else{return;};
+            to_location.footprint.offset=u64::from(mapped);
+            if copy.mip_drop>0{crate::texture::host_written_subresource(dst.resource,mapped);}
+            else{crate::texture::host_written(dst.resource);}
+        }
+        if let Some(copy)=src_copy.as_ref(){
+            let Some(mapped)=copy.host_subresource(src.footprint.offset as u32)else{return;};
+            from.footprint.offset=u64::from(mapped);
+        }
+        list.twin_use(dst.resource,false,true);
+        ensure_state(list,dst.resource,COPY_DEST);
+        to_location.resource=to.as_raw().cast_const().cast();
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
         #[cfg(feature = "diagnostics")]
         {
@@ -1071,8 +1134,10 @@ fn read_back(
     // The title's buffer holds every row at its own pitch.
     let bytes = pitch * (rows - 1) + row;
     let data = buffer_range(dst.resource, dst.footprint.offset, bytes).ok_or("a destination outside its buffer")?;
-    let texture = crate::resource::host_resource(src.resource).ok_or("no host texture")?;
-    let buffer = host.read_back_buffer(size).ok_or("no read-back buffer")?;
+    let texture=crate::resource::host_resource(src.resource).ok_or("no host texture")?;
+    let src_copy=crate::resource::host_copy(src.resource).ok_or("no host texture metadata")?;
+    let src_sub=src_copy.host_subresource(src.footprint.offset as u32).ok_or("source mip was dropped")?;
+    let buffer=host.read_back_buffer(size).ok_or("no read-back buffer")?;
     // As a texture source of any copy: what shaders wrote to a depth twin
     // and what the title wrote itself first, then the state.
     list.twin_use(src.resource, false, false);
@@ -1080,9 +1145,10 @@ fn read_back(
         crate::texture::upload(list, src.resource, texture);
     }
     ensure_state(list, src.resource, COPY_SOURCE);
-    let mut from = src;
-    from.resource = texture.as_raw().cast_const().cast();
-    let mut to = dst;
+    let mut from=src;
+    from.footprint.offset=u64::from(src_sub);
+    from.resource=texture.as_raw().cast_const().cast();
+    let mut to=dst;
     to.resource = buffer.as_raw().cast_const().cast();
     to.footprint = footprint;
     let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
@@ -1141,15 +1207,13 @@ extern "system" fn resolve(
         use windows::core::Interface;
         const RESOLVE_DEST: u32 = 0x1000;
         const RESOLVE_SOURCE: u32 = 0x2000;
-        if unlike(dst, src) {
-            return;
-        }
-        // Depth textures shaders also write: what they wrote, first.
-        list.twin_use(dst, false, true);
-        list.twin_use(src, false, false);
-        ensure_state(list, dst, RESOLVE_DEST);
-        ensure_state(list, src, RESOLVE_SOURCE);
-        crate::texture::host_written(dst);
+        if unlike(dst,src){return;}
+        let (Some(dst_copy),Some(src_copy))=(crate::resource::host_copy(dst),crate::resource::host_copy(src))else{return;};
+        let (Some(dst_sub),Some(src_sub))=(dst_copy.host_subresource(dst_sub),src_copy.host_subresource(src_sub))else{return;};
+        list.twin_use(dst,false,true);list.twin_use(src,false,false);
+        ensure_state(list,dst,RESOLVE_DEST);ensure_state(list,src,RESOLVE_SOURCE);
+        if dst_copy.mip_drop>0{crate::texture::host_written_subresource(dst,dst_sub);}
+        else{crate::texture::host_written(dst);}
         #[cfg(feature = "diagnostics")]
         list.note_op(|| format!("resolve {src:?} to {dst:?} format {format}"));
         // SAFETY: an open list and live textures; the region is inside both.
