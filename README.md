@@ -115,11 +115,13 @@ reported about 12 GB of free physical RAM at startup, so the evidence points
 to GPU-local allocation pressure rather than an already-exhausted page file.
 
 The decisive memory samples showed 6,612 MB of local GPU usage against a
-3,403 MB DXGI budget, plus 4,707 MB of shared GPU memory in use. At the same
-time, the wrapper had about 2,349 MB of host textures and 4,068 MB of
-device-local UAV/card buffers alive. Repeated 32 MiB UAV and 1 MiB shared
-buffer allocations then failed with `0x8007000E`; black frames followed,
-then the device was removed (`0x887A0005`). The last reported
+3,403 MB DXGI budget, plus 4,707 MB of shared GPU memory in use. The wrapper
+had about 2,349 MB of host textures alive. The separate "made so far" counter
+listed 570 device-local UAV/card-buffer allocations totalling 4,068 MB since
+startup; that is cumulative allocation history, **not** a live-bytes figure,
+and it does not identify every allocation as mesh scratch. Repeated 32 MiB
+UAV and 1 MiB shared-buffer allocations then failed with `0x8007000E`;
+black frames followed, then the device was removed (`0x887A0005`). The last reported
 `0x887A0004` is a post-removal device reason, not proof that one specific
 unsupported feature caused the initial failure.
 
@@ -165,6 +167,10 @@ reaches 80% of budget. Once either limit is reached, new mesh scratch uses a
 CPU-visible shared-memory UAV buffer. This can reduce performance but avoids
 adding more local allocations. `VICTORY_MESH_LOCAL_BUDGET_MB` may lower the
 automatic allowance; it cannot raise it.
+The new diagnostics build also reports live mesh scratch separately:
+local default-heap chunks and CPU-visible shared-memory fallback chunks. This
+will distinguish retained mesh-pool memory from the cumulative "made so far"
+buffer counters in the next hardware log.
 
 ## License
 

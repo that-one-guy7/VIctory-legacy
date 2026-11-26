@@ -1364,6 +1364,12 @@ const MESH_POOL_BUDGET: u64 = 64 << 20;
 const MESH_LOCAL_POOL_MAX: u64 = 512 << 20;
 static MESH_LOCAL_POOL_BYTES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+static MESH_LOCAL_POOL_BUFFERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_SHARED_POOL_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static MESH_SHARED_POOL_BUFFERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) struct ScratchRegion {
     pub(crate) buffer: ID3D12Resource,
@@ -1371,15 +1377,14 @@ pub(crate) struct ScratchRegion {
     pub(crate) first: bool,
 }
 
-impl Drop for Pool {
+impl Drop for MeshChunk {
     fn drop(&mut self) {
-        let local = self
-            .chunks
-            .iter()
-            .filter(|chunk| chunk.local)
-            .fold(0u64, |sum, chunk| sum.saturating_add(chunk.size));
-        if local != 0 {
-            MESH_LOCAL_POOL_BYTES.fetch_sub(local, Ordering::AcqRel);
+        if self.local {
+            MESH_LOCAL_POOL_BYTES.fetch_sub(self.size, Ordering::AcqRel);
+            MESH_LOCAL_POOL_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            MESH_SHARED_POOL_BYTES.fetch_sub(self.size, Ordering::AcqRel);
+            MESH_SHARED_POOL_BUFFERS.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -1432,6 +1437,12 @@ impl Pool {
                     self.failed.insert(size);
                     return None;
                 };
+                if local {
+                    MESH_LOCAL_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    MESH_SHARED_POOL_BYTES.fetch_add(size, Ordering::Relaxed);
+                    MESH_SHARED_POOL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+                }
                 self.chunks.push(MeshChunk {
                     buffer,
                     size,
@@ -6547,6 +6558,18 @@ fn reserve_mesh_local_pool(size: u64, limit: u64) -> bool {
             Err(actual) => used = actual,
         }
     }
+}
+
+/// Live mesh-scratch chunks: local buffer count/bytes, then shared buffer
+/// count/bytes. Exposed to diagnostics so hardware runs can confirm which
+/// scratch path was actually used.
+pub(crate) fn mesh_scratch_stats() -> [u64; 4] {
+    [
+        MESH_LOCAL_POOL_BUFFERS.load(Ordering::Relaxed),
+        MESH_LOCAL_POOL_BYTES.load(Ordering::Relaxed),
+        MESH_SHARED_POOL_BUFFERS.load(Ordering::Relaxed),
+        MESH_SHARED_POOL_BYTES.load(Ordering::Relaxed),
+    ]
 }
 
 /// Leaves 15% of the reported local-memory budget available for the

@@ -48,3 +48,9 @@ mesh scratch allocations. It does not migrate old chunks, cap all D3D12
 allocations, or change texture/render-target allocation. A failed shared
 allocation can still prevent that mesh operation, and device stability must
 be confirmed on the target GPU.
+
+The launcher/copy statistics also report device-local UAV buffers as a
+cumulative "made so far" count; that number is not the live size of mesh
+scratch. Diagnostics now print live mesh-scratch chunk counts and bytes for
+both local and shared-memory chunks, so the next hardware log can verify how
+much this pool actually retains.
