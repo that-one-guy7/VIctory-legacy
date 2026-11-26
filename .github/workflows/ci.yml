@@ -62,6 +62,26 @@ jobs:
             throw ($parseErrors | Out-String)
           }
 
+          # Keep the launcher report useful as new switches are added, and
+          # ensure it does not regress to dumping the entire process environment.
+          $launcher = Get-Content -LiteralPath "scripts\play.ps1" -Raw
+          foreach ($required in @(
+            "VICTORY_*",
+            "GetEnvironmentVariables",
+            "Win32_OperatingSystem",
+            "Win32_Processor",
+            "Win32_VideoController",
+            "agility_sdk_expected",
+            "exit_code="
+          )) {
+            if ($launcher -notmatch [regex]::Escape($required)) {
+              throw "Launcher diagnostic report is missing required field or behavior: $required"
+            }
+          }
+          if ($launcher -match "GetEnvironmentVariables\(\s*\)") {
+            throw "Launcher must not dump the complete process environment"
+          }
+
           $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
           if (!$dumpbin) {
             $vswhere = Join-Path "${env:ProgramFiles(x86)}" "Microsoft Visual Studio\Installer\vswhere.exe"
