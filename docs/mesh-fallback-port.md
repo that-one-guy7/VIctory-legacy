@@ -1,6 +1,6 @@
 # Mesh-shader fallback: port plan and status
 
-**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45728677789](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45728677789) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `5fc2c42`. A later runtime log exposed a mesh-compute root-signature bug and GPU allocation pressure; the targeted fixes below are being validated in CI. Physical-GPU/image-equivalence validation remains outstanding.**
+**Status: experimental compute/vertex fallback is wired for direct and indirect dispatch. Windows CI run [45731295379](https://github.com/that-one-guy7/VIctory-legacy/actions/runs/45731295379) passed Clippy, the diagnostics build, workspace tests, Agility SDK staging, the Release build, export checks, and PowerShell launcher parsing for commit `ca6a1e8`. That follow-up fixes the shifted mesh-compute descriptor-table register space and disables extra GPU-local title-buffer shadows by default in the low-VRAM fallback profile. Physical-GPU/image-equivalence validation remains outstanding.**
 
 ## Follow-up from the GTX 1050 Ti runtime log
 
