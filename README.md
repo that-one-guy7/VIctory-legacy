@@ -59,6 +59,10 @@ time on the test machines. Set them in PowerShell before running the script.
 
 `VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The default is `1.0` (off). The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure. Keep it disabled unless you are testing this behavior.
 
+## Diagnostic log
+
+The launcher records effective `VICTORY_*` settings, Windows/PowerShell versions, and best-effort CPU, display-adapter, and physical-memory details in `%TEMP%\\ztrx.log`. This makes stale environment overrides and machine differences easier to spot without dumping unrelated process variables. See [docs/diagnostic-log.md](docs/diagnostic-log.md) before sharing a log.
+
 ## Debugging switches
 
 | Switch | Effect |
