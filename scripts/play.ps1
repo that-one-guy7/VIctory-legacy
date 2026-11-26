@@ -92,13 +92,22 @@ if ($env:VICTORY_MESH_FALLBACK -eq "1") {
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
         VICTORY_WIDE_REFRESH = "1"
+        # This profile is intentionally aggressive for 4 GB-class adapters.
+        # These only affect eligible host-side resources; the title's own
+        # resource descriptions and required mesh/indirect allocations remain intact.
+        VICTORY_RENDER_SCALE = "0.5"
+        VICTORY_RENDER_SCALE_MIN_SIZE = "512"
+        VICTORY_TEXTURE_MIP_DROP = "2"
+        VICTORY_TEXTURE_MIP_DROP_MIN_SIZE = "1024"
+        VICTORY_MESH_LOCAL_BUDGET_MB = "128"
+        VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name, "Process"))) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    Write-Host "Mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS; parallel CPU refresh/snapshot/merge; batched GPU hash work." -ForegroundColor Cyan
+    Write-Host "Low-VRAM mesh fallback profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies enabled=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
