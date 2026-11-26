@@ -487,6 +487,7 @@ fn twin_texture(
         )
     };
     if let Err(e) = made {
+        crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, "no colour twin for a depth texture");
     }
     let Some(texture) = texture else {
@@ -550,6 +551,7 @@ fn twin_texture(
             )
         };
         if let Err(e) = made {
+            crate::residency::allocation_error(&e);
             tracing::warn!(error = %e, desc = ?d, "no twin for a depth plane");
         }
         texture.map(|texture| {
@@ -1868,6 +1870,7 @@ fn host_texture(
         )
     };
     if let Err(e) = made {
+        crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, "no host texture");
     }
     if let Some(t) = &texture {
