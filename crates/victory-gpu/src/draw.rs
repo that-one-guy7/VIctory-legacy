@@ -3114,3 +3114,26 @@ pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
     // SAFETY: an open list.
     unsafe { list.list.OMSetStencilRef(reference) };
 }
+
+#[cfg(test)]
+mod render_scale_tests {
+    use super::*;
+
+    #[test]
+    fn render_scale_rectangles_round_outward() {
+        let input = [RECT { left: 1, top: 3, right: 101, bottom: 203 }];
+        let scaled = scale_rectangles(&input, 0.5, 0.25);
+        assert_eq!(scaled[0].left, 0);
+        assert_eq!(scaled[0].top, 0);
+        assert_eq!(scaled[0].right, 51);
+        assert_eq!(scaled[0].bottom, 51);
+    }
+
+    #[test]
+    fn render_scale_rectangles_preserve_native_dimensions() {
+        let input = [RECT { left: 0, top: 0, right: 1280, bottom: 720 }];
+        let scaled = scale_rectangles(&input, 1.0, 1.0);
+        assert_eq!(scaled[0].right, 1280);
+        assert_eq!(scaled[0].bottom, 720);
+    }
+}
