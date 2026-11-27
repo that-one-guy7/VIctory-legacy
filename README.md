@@ -64,7 +64,7 @@ stage-3 path omits the diagnostics-only per-present black-frame readback.
 
 ## Experimental render-resolution scaling
 
-`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general and diagnostic low-VRAM defaults remain native size (`1.0`) because mixed-scale GPU copies can be skipped and may produce missing or stale output. To test scaling in a controlled scene, explicitly set `VICTORY_RENDER_SCALE` to a value from `0.25` through `0.75`; inspect the log for skipped-copy warnings and verify depth, shadows, UI and post-processing. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure.
+`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general and diagnostic low-VRAM defaults remain native size (`1.0`) because mixed-scale GPU copies can be skipped and may produce missing or stale output. To test scaling through the low-VRAM launcher in a controlled scene, set `VICTORY_RENDER_SCALE_OVERRIDE=1` and set `VICTORY_RENDER_SCALE` to a value from `0.25` through `0.75`; inspect the log for skipped-copy warnings and verify depth, shadows, UI and post-processing. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure.
 
 ## Diagnostic log
 
@@ -161,10 +161,10 @@ its fence wait after every host list significantly reduced throughput. To opt
 into that detailed TDR trace, set `VICTORY_GPU_TIMING_OVERRIDE=1`; timing then
 takes precedence over batching.
 
-Render-target scaling remains at native size by default. The separate scaling
-experiment can skip mixed-size copies and produce missing or stale output, so
-only enable it for controlled A/B tests as described in
-`docs/render-resolution-scale.md`. The preset otherwise uses title mode
+Render-target scaling remains at native size by default; set
+`VICTORY_RENDER_SCALE_OVERRIDE=1` to enable the separate scaling experiment.
+It can skip mixed-size copies and produce missing or stale output, so only use
+it for controlled A/B tests as described in `docs/render-resolution-scale.md`. The preset otherwise uses title mode
 `1280x720`, three dropped top mip levels on eligible large sampled textures,
 indirect-window batching disabled by default (`VICTORY_INDIRECT_WINDOW=0`),
 a 1 MiB grid for length-bounded title-memory windows
