@@ -26,6 +26,9 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// Fingerprints of descriptor records last reconciled from raw title-heap writes.
+    /// Empty until the first changed page is scanned.
+    copied: Mutex<Vec<u64>>,
     /// Placed slots logically cleared while GPU submissions are in flight;
     /// their shader-visible descriptors are overwritten once the GPU is idle.
     pending_unmake: Mutex<Vec<(u32, u64)>>,
@@ -449,6 +452,23 @@ pub(crate) static REFUSED_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomi
 /// Log once on the first observation and then at most once per 64K-slot bucket.
 const OUT_OF_RANGE_WARNING_SHIFT: u32 = 16;
 
+/// A fast 64-bit fingerprint for a 16- or 32-byte descriptor record.
+/// Records are our own process data, not attacker-controlled input.
+fn record_print(record: &[u8]) -> u64 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut hash = K ^ record.len() as u64;
+    let mut words = record.chunks_exact(8);
+    for word in &mut words {
+        let value = u64::from_le_bytes(word.try_into().unwrap_or([0; 8]));
+        hash = (hash ^ value).wrapping_mul(K);
+        hash ^= hash >> 29;
+    }
+    for &byte in words.remainder() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(K);
+    }
+    hash ^ (hash >> 32)
+}
+
 fn out_of_range_warning_due(previous: u32, index: u32) -> bool {
     previous < index
         && (previous == 0
@@ -649,6 +669,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            copied: Mutex::new(Vec::new()),
             pending_unmake: Mutex::default(),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             next: Mutex::new((0, vec![false; DYNAMIC as usize])),
@@ -1306,6 +1327,61 @@ impl HostHeap {
         D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: self.cpu + index as usize * self.step as usize,
         }
+    }
+
+    /// Reconciles records from one changed page of the title's shader-visible
+    /// heap. The page is read once by the caller; unchanged records are rejected
+    /// by a cheap fingerprint before taking the per-slot `made` lock in
+    /// `mirror`. Returns the complete records examined and records remade.
+    pub(crate) fn mirror_copied_page(
+        &self,
+        slots: std::ops::Range<u64>,
+        (start, step): (u64, u64),
+        from: usize,
+        page: &[u8],
+    ) -> (u64, u64) {
+        let mut looked = 0u64;
+        let mut due: Vec<(u32, u64)> = Vec::new();
+        {
+            let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+            if copied.is_empty() {
+                copied.resize(self.count as usize, 0);
+            }
+            for slot in slots {
+                let handle = start + slot * step;
+                // A record that straddles the range's ends is left to the
+                // range that holds its first byte.
+                let Some(at) = (handle as usize).checked_sub(from) else {
+                    continue;
+                };
+                let Some(end) = at.checked_add(step as usize) else {
+                    continue;
+                };
+                let Some(record) = page.get(at..end) else {
+                    continue;
+                };
+                looked += 1;
+                let Some(last) = copied.get_mut(slot as usize) else {
+                    continue;
+                };
+                // Never 0, which means "not fingerprinted yet".
+                let print = record_print(record) | 1;
+                // A record already reconciled is done. Even a first-seen
+                // all-zero record must pass through mirror(): the host slot may
+                // still contain an older descriptor made through the API path.
+                if *last == print {
+                    continue;
+                }
+                *last = print;
+                due.push((slot as u32, handle));
+            }
+        }
+        // Do descriptor creation after releasing the fingerprint lock. This
+        // preserves the existing mirror() lock order and descriptor lifetime.
+        for &(index, handle) in &due {
+            self.mirror(index, handle, false);
+        }
+        (looked, due.len() as u64)
     }
 
     /// Makes host slot `index` from the record the title has at `handle`
@@ -2729,5 +2805,31 @@ mod tests {
         assert_eq!(heap.flush_unmake(), 1);
         assert_eq!(heap.flush_unmake(), 0);
         assert_eq!(heap.made.lock().unwrap_or_else(|e| e.into_inner())[2], 42);
+    }
+}
+
+#[cfg(test)]
+mod record_print_tests {
+    use super::record_print;
+
+    #[test]
+    fn descriptor_record_fingerprints_are_stable_and_sensitive_to_bytes() {
+        let record: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(37).wrapping_add(5)).collect();
+        let fingerprint = record_print(&record);
+        assert_eq!(fingerprint, record_print(&record));
+        for at in 0..record.len() {
+            for bit in 0..8 {
+                let mut changed = record.clone();
+                changed[at] ^= 1 << bit;
+                assert_ne!(
+                    record_print(&changed),
+                    fingerprint,
+                    "byte {at}, bit {bit}"
+                );
+            }
+        }
+        assert_ne!(record_print(&record[..16]), fingerprint);
+        assert_ne!(record_print(&[0; 32]), record_print(&[0; 16]));
+        assert_ne!(record_print(&[0; 32]) | 1, 0);
     }
 }
