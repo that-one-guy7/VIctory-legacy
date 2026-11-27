@@ -102,6 +102,9 @@ if ($UseLowVramProfile) {
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
         VICTORY_TEXTURE_MIP_DROP = "2"
         VICTORY_TEXTURE_MIP_DROP_MIN_SIZE = "1024"
+        # Length-bounded title-memory windows default to 4 MiB. A 1 MiB grid
+        # trims unused host-copy tails without changing unsized root-view spans.
+        VICTORY_WINDOW_KB = "1024"
         VICTORY_MESH_LOCAL_BUDGET_MB = "128"
         VICTORY_MESH_SHARED_SPARE_MB = "128"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
@@ -112,6 +115,7 @@ if ($UseLowVramProfile) {
         }
     }
     Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    Write-Host "Length-bounded title-memory window grid: $env:VICTORY_WINDOW_KB KiB (unsized root views remain 4 MiB)." -ForegroundColor Cyan
 }
 
 # A failed command-list Close may hide invalid D3D12 commands. Enable the debug
