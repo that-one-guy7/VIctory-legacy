@@ -100,9 +100,13 @@ fallback flag is required. Explicit `VICTORY_*` values take precedence.
 Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
 title-buffer shadows, native host render/depth target dimensions
 (`VICTORY_RENDER_SCALE=1.0`), two dropped top mip levels on eligible large
-sampled textures, a 128 MiB aggregate local mesh-scratch cap, a 128 MiB idle
-shared-scratch reuse cache, and a 70% local-memory threshold for optional UAV
-optimizations. Native render-target dimensions are intentional: the GTX 1050 Ti
+sampled textures, a 1 MiB grid for length-bounded title-memory windows
+(`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
+128 MiB aggregate local mesh-scratch cap, a 128 MiB idle shared-scratch reuse
+cache, and a 70% local-memory threshold for optional UAV optimizations. The
+smaller grid aims to trim unused tails of host copies, but can create more
+overlapping windows; memory and frame-time measurements must verify the
+trade-off. Native render-target dimensions are intentional: the GTX 1050 Ti
 log recorded a `CopyResource` skipped because source and destination host
 render-target scales differed. Shared scratch chunks are recycled across host
 lists after their submissions finish; chunks beyond the cache limit are
@@ -132,12 +136,26 @@ prelude with D3D12 `E_OUTOFMEMORY (0x8007000E)`; the launcher exited with
 had fallen to 24 MiB, so the previous residency guard was running but did not
 cover the larger remaining pools.
 
-The final memory sample reported about 4,280 MiB of local GPU use against a
-3,403 MiB DXGI budget; 1,567 MiB of physical RAM remained free. Host textures
-were about 2,860 MiB and host copies of title memory about 4,557 MiB. Mesh
+The final memory sample's GPU-budget line reported 4,214 MiB in use
+against a 3,403 MiB budget; 6,198 MiB of PC memory was shared with the GPU,
+and 1,567 MiB of physical RAM remained free. Host textures were about
+2,860 MiB. Host copies of title memory were 4,557 MiB, including 3,568 MiB
+across 854 windows outside title buffers; the diagnostic line's low-to-high
+asked-address spans within those windows totaled about 1,694 MiB. Mesh
 fallback scratch held 477 MiB in local buffers and 739 MiB in shared-memory
-buffers, including 236 MiB cached spare. Ten title-buffer copies also held
-about 492 MiB in card-local memory.
+buffers, including 236 MiB cached spare. The memory report also counted
+1,040 MiB of card buffers made since startup; this is cumulative allocation,
+not a live-byte count.
+
+The same memory report shows a host-copy sizing opportunity. Its 854 live
+windows outside title buffers held 3,568 MiB, while the reported spans from
+the lowest to highest asked address within those windows totaled about
+1,694 MiB. The implementation defaults to a 4 MiB grid for length-bounded
+windows and documents 1 MiB as a way to end windows nearer the requested
+ranges. The low-VRAM launcher now uses 1 MiB for those length-bounded windows;
+root-view asks without a length still use 4 MiB. A smaller grid can create more
+overlapping windows and duplicate copies, so this is a measured trade-off to
+verify in the next run, not a guaranteed memory reduction.
 
 The launcher header showed that no low-VRAM profile overrides or
 `VICTORY_D3D12_DEBUG` setting were active: only DRED was enabled. The runtime
