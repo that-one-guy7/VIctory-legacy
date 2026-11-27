@@ -248,6 +248,15 @@ pub(crate) fn remapped(at: usize, len: usize) {
     ranges.push((start, end));
 }
 
+/// The byte size of a D3D12 constant-buffer view. A CBV must be
+/// non-zero and its extent must be aligned up to 256 bytes.
+pub(crate) fn constant_buffer_size(size: u32) -> Option<u32> {
+    if size == 0 {
+        return None;
+    }
+    size.checked_add(255).map(|aligned| aligned & !255)
+}
+
 /// Frames for which a slot a draw read through a table counts as a table's
 /// slot ([`HostHeap::tabled`]).
 const TABLED_FRAMES: u64 = 240;
@@ -1260,14 +1269,31 @@ impl HostHeap {
         }
     }
 
+    /// Makes slot `index` (a dynamic one) a null constant-buffer view.
+    /// A zero-sized CBV is invalid; a null CBV reads zeros.
+    pub(crate) fn null_constant_at(&self, index: u32) {
+        self.keep(index, None);
+        let Some(host) = host() else { return };
+        // SAFETY: a slot of our view heap; a null CBV is a valid null descriptor.
+        unsafe {
+            host.device
+                .CreateConstantBufferView(None, self.cpu(index))
+        };
+    }
+
     /// Makes slot `index` (a dynamic one) a constant buffer view of host
-    /// memory (the list's own, which it holds).
+    /// memory (the list's own, which it holds). `size` is the title's
+    /// byte count; D3D12 rounds the descriptor extent up to 256 bytes.
     pub(crate) fn constant_at(&self, index: u32, gpu: u64, size: u32) {
+        let Some(size) = constant_buffer_size(size) else {
+            self.null_constant_at(index);
+            return;
+        };
         self.keep(index, None);
         let Some(host) = host() else { return };
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: gpu,
-            SizeInBytes: size.next_multiple_of(256),
+            SizeInBytes: size,
         };
         // SAFETY: a slot of our heap; the memory is the caller's.
         unsafe {
@@ -2435,6 +2461,30 @@ mod tests {
         let View::Placed(_, resource, desc) = low.clone() else { unreachable!() };
         assert!(!same_placed_texture(&low, &View::Placed(true, resource, desc)));
         assert!(!same_placed_texture(&low, &View::Shader(0, None)));
+    }
+
+    #[test]
+    fn constant_buffer_sizes_are_nonzero_and_256_byte_aligned() {
+        assert_eq!(constant_buffer_size(0), None);
+        assert_eq!(constant_buffer_size(1), Some(256));
+        assert_eq!(constant_buffer_size(255), Some(256));
+        assert_eq!(constant_buffer_size(256), Some(256));
+        assert_eq!(constant_buffer_size(257), Some(512));
+        assert_eq!(constant_buffer_size(u32::MAX), None);
+    }
+
+    /// A null constant-buffer descriptor is valid on the real D3D12 device.
+    #[test]
+    fn null_constant_buffer_is_accepted_by_the_device() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        heap.constant_at(0, 0, 0);
+        // SAFETY: a plain device query.
+        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
     }
 
     /// A null 3D UAV made on the real device leaves it alive.
