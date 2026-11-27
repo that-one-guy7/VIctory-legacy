@@ -130,6 +130,9 @@ pub(crate) fn references(object: &impl Interface) -> u32 {
 fn sweep() {
     // The in-place probe and census, if asked for (`VICTORY_INPLACE_PROBE`).
     crate::inplace::tick();
+    // Drain descriptor clears deferred while GPU submissions were in flight.
+    // This must run even when the optional resource sweep is disabled.
+    crate::descriptor::flush_idle_heaps();
     static ON: OnceLock<bool> = OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_SWEEP").is_none_or(|v| v != "0")) {
         return;
@@ -2294,7 +2297,7 @@ fn join_ranges(ranges: &mut Vec<(usize, usize)>, more: impl IntoIterator<Item = 
 }
 
 /// Whether anything is in the air.
-fn flying() -> bool {
+pub(crate) fn flying() -> bool {
     if !late() {
         return false;
     }

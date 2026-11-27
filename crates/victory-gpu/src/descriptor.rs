@@ -217,6 +217,20 @@ pub(crate) fn resync_title_writes() {
     }
 }
 
+/// Flushes deferred descriptor unmakings on every live shader-visible heap
+/// once no GPU submission is executing.
+#[cfg(windows)]
+pub(crate) fn flush_idle_heaps() {
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    for &(_, _, at) in heaps.iter() {
+        // SAFETY: registered heaps are live (removed when dropped).
+        let heap = unsafe { &*(at as *const Heap) };
+        if let Some(Some(host)) = heap.host.get() {
+            host.flush_unmake();
+        }
+    }
+}
+
 /// Gives back dynamic slots of the host heap behind the title heap at
 /// `heap`, if that heap still exists.
 #[cfg(windows)]
