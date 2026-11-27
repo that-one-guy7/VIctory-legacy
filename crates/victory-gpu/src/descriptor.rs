@@ -168,10 +168,28 @@ fn mirror(handle: u64) {
 }
 
 /// Per changed-page descriptor reconciliation: pages, records inspected,
-/// records remade. Diagnostic builds only.
+/// records remade, microseconds spent. Diagnostic builds only.
 #[cfg(all(windows, feature = "diagnostics"))]
-static DESCRIPTOR_SYNC: [std::sync::atomic::AtomicU64; 3] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+static DESCRIPTOR_SYNC: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Logs descriptor-page reconciliation cost since the last frame report.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn descriptor_sync_line(frames: f64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let [pages, looked, remade, micros] =
+        [0, 1, 2, 3].map(|i| DESCRIPTOR_SYNC[i].swap(0, Relaxed));
+    if pages == 0 {
+        return;
+    }
+    tracing::info!(
+        "descriptor page sync per frame: {:.1} changed pages; {:.0} records inspected;          {:.0} records remade; {:.2} ms",
+        pages as f64 / frames,
+        looked as f64 / frames,
+        remade as f64 / frames,
+        micros as f64 / 1000.0 / frames,
+    );
+}
 
 /// Reconciles host-visible descriptors with whole slots the title wrote
 /// directly into its own shader-visible heap memory. Those writes bypass
@@ -188,6 +206,8 @@ pub(crate) fn resync_title_writes() {
 
     // One reconciliation at a time; the read guard keeps every registered
     // Heap alive while its page records are read and mirrored.
+    let started = std::time::Instant::now();
+    let (mut pages_seen, mut records_seen, mut records_remade) = (0u64, 0u64, 0u64);
     let _syncing = SYNCING.lock().unwrap_or_else(|e| e.into_inner());
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
     let page = crate::watch::PAGE as u64;
@@ -231,6 +251,7 @@ pub(crate) fn resync_title_writes() {
             if !crate::host::read_into(from as *const u8, &mut page_bytes) {
                 continue;
             }
+            pages_seen += 1;
             let first_slot = (from - start) / step;
             let last_slot = (to - start).div_ceil(step).min(u64::from(mirrored_count));
             if first_slot >= last_slot {
@@ -242,16 +263,19 @@ pub(crate) fn resync_title_writes() {
                 from as usize,
                 &page_bytes,
             );
-            #[cfg(feature = "diagnostics")]
-            {
-                DESCRIPTOR_SYNC[0].fetch_add(1, Relaxed);
-                DESCRIPTOR_SYNC[1].fetch_add(looked, Relaxed);
-                DESCRIPTOR_SYNC[2].fetch_add(mirrored, Relaxed);
-            }
-            #[cfg(not(feature = "diagnostics"))]
-            let _ = (looked, mirrored);
+            records_seen += looked;
+            records_remade += mirrored;
         }
     }
+    #[cfg(feature = "diagnostics")]
+    {
+        DESCRIPTOR_SYNC[0].fetch_add(pages_seen, Relaxed);
+        DESCRIPTOR_SYNC[1].fetch_add(records_seen, Relaxed);
+        DESCRIPTOR_SYNC[2].fetch_add(records_remade, Relaxed);
+        DESCRIPTOR_SYNC[3].fetch_add(started.elapsed().as_micros() as u64, Relaxed);
+    }
+    #[cfg(not(feature = "diagnostics"))]
+    let _ = (started, pages_seen, records_seen, records_remade);
 }
 
 /// Flushes deferred descriptor unmakings on every live shader-visible heap
