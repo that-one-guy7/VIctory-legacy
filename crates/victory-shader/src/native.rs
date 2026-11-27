@@ -69,7 +69,7 @@
 //! Unknown versions are rejected so a format change shows up as an error.
 
 use crate::ShaderError::{self, Malformed};
-use crate::dxbc::{u32_at, u64_at};
+use crate::dxbc::{u16_at, u32_at, u64_at};
 
 const XDAT_OFFSET: usize = 0x18;
 const MAX_XDAT_ENTRIES: usize = 64;
