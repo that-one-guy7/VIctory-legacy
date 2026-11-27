@@ -102,11 +102,15 @@ title-buffer shadows, native host render/depth target dimensions
 (`VICTORY_RENDER_SCALE=1.0`), two dropped top mip levels on eligible large
 sampled textures, a 1 MiB grid for length-bounded title-memory windows
 (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
-128 MiB aggregate local mesh-scratch cap, a 128 MiB idle shared-scratch reuse
+128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
 cache, and a 70% local-memory threshold for optional UAV optimizations. The
-smaller grid aims to trim unused tails of host copies, but can create more
-overlapping windows; memory and frame-time measurements must verify the
-trade-off. Native render-target dimensions are intentional: the GTX 1050 Ti
+low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
+compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
+system. This can lengthen asset streaming and shader warm-up; explicit
+environment overrides remain available. The smaller grid aims to trim unused
+tails of host copies, but can create more overlapping windows; memory and
+frame-time measurements must verify the trade-off. Native render-target
+dimensions are intentional: the GTX 1050 Ti
 log recorded a `CopyResource` skipped because source and destination host
 render-target scales differed. Shared scratch chunks are recycled across host
 lists after their submissions finish; chunks beyond the cache limit are
@@ -118,6 +122,22 @@ preserved. Texture mip dropping still reduces eligible sampled textures.
 These changes can reduce image quality and performance, do not cap every
 D3D12 allocation, and do not guarantee correct rendering or playable
 performance.
+
+### Follow-up GTX 1050 Ti crash run before PR #32 (2026-11-26, 21:54 local / -06:00)
+
+This run was built before PR #32 was merged. Its final memory report still says
+`windows outside buffers (grid 4096 KiB)`, so it is not a validation run for
+the 1 MiB window setting. It ended with an unhandled access violation
+`0xC0000005` in `nvwgf2umx.dll+0x159f58` (read from address `0xC`), not the
+D3D12 `E_OUTOFMEMORY` seen in the earlier run. The final GPU memory sample
+reported 3,890 MiB against a 3,403 MiB local budget and 6,443 MiB of shared
+system memory in use. Windows reported 1,315 MiB of physical RAM free; the
+process had 21,774 MiB of private bytes. Host textures held 3,273 MiB,
+title-memory host copies held 4,344 MiB, and mesh fallback held 1,181 MiB in
+shared buffers (103 MiB of that was idle spare) plus 128 MiB local. The
+DirectStorage pool started 8 workers on the machine's 8 logical processors.
+These figures motivate tighter background-worker and idle-cache defaults;
+they do not prove the NVIDIA driver access violation has a single cause.
 
 See [docs/local-uav-memory-headroom.md](docs/local-uav-memory-headroom.md)
 for the stricter profile and its allocation limits.

@@ -105,7 +105,11 @@ if ($UseLowVramProfile) {
         # The regular window grid is 4 MiB; use 1 MiB for length-bounded host copies.
         VICTORY_WINDOW_KB = "1024"
         VICTORY_MESH_LOCAL_BUDGET_MB = "128"
-        VICTORY_MESH_SHARED_SPARE_MB = "128"
+        # Keep only a small idle shared-scratch cache on systems with limited RAM.
+        VICTORY_MESH_SHARED_SPARE_MB = "32"
+        # Leave CPU headroom for the title instead of saturating all logical processors.
+        VICTORY_DSTORAGE_WORKERS = "3"
+        VICTORY_PIPELINE_WORKERS = "2"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
@@ -113,7 +117,7 @@ if ($UseLowVramProfile) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
     Write-Host "Length-bounded title-memory window grid: $env:VICTORY_WINDOW_KB KiB; unsized root views remain 4 MiB." -ForegroundColor Cyan
 }
 
