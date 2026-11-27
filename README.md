@@ -64,7 +64,7 @@ stage-3 path omits the diagnostics-only per-present black-frame readback.
 
 ## Experimental render-resolution scaling
 
-`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general default is `1.0` (off); the `diag` low-VRAM launcher preset clamps the value to `0.5` or lower on 4 GB-class testing systems so stale PowerShell environment values cannot silently disable the reduction. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. To deliberately test a larger scale (including native size), set `VICTORY_RENDER_SCALE_OVERRIDE=1` and then set `VICTORY_RENDER_SCALE` to the desired value. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure.
+`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general and diagnostic low-VRAM defaults remain native size (`1.0`) because mixed-scale GPU copies can be skipped and may produce missing or stale output. To test scaling in a controlled scene, explicitly set `VICTORY_RENDER_SCALE` to a value from `0.25` through `0.75`; inspect the log for skipped-copy warnings and verify depth, shadows, UI and post-processing. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure.
 
 ## Diagnostic log
 
@@ -147,16 +147,17 @@ crash-reproduction path because the runtime may select compute/vertex mesh
 fallback automatically when native mesh shaders are unavailable; no manual
 fallback flag is required. Most preset values still honour explicit process
 settings. The diagnostic low-VRAM profile has three deliberate exceptions to
-avoid stale values defeating the tested safety settings: eligible host render
-and depth targets are scaled to at most half size unless
-`VICTORY_RENDER_SCALE_OVERRIDE=1`; GPU-local shadows are enabled only for title
-buffers at least 64 MiB, with a 128 MiB aggregate cap
-(`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
-`VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`; and
+avoid stale values defeating the tested throughput settings: GPU-local shadows
+are enabled only for title buffers at least 64 MiB, with a 128 MiB aggregate
+cap (`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
+`VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`;
 host-list submissions are grouped in batches of two, with one fence wait per
-batch. The batch size can be changed to 1–16 with `VICTORY_GPU_BATCH_LISTS`; set
+batch; and per-list GPU timing is disabled by default. The batch size can be changed to 1–16 with `VICTORY_GPU_BATCH_LISTS`; set
 `VICTORY_GPU_BATCH_LISTS_OVERRIDE=1` to prevent the diagnostic launcher from
-resetting it to two. Per-list GPU timing remains disabled by default because its
+resetting it to two. Render-target scaling remains at native size by default;
+the separate scaling experiment can skip mixed-size copies and produce missing
+or stale output, so only enable it for controlled A/B tests as described in
+`docs/render-resolution-scale.md`. Per-list GPU timing remains disabled by default because its
 fence wait after every host list significantly reduced throughput. To opt into
 that detailed TDR trace, set `VICTORY_GPU_TIMING_OVERRIDE=1`; timing then takes
 precedence over batching. The GPU-local buffer copies are only attempted while
