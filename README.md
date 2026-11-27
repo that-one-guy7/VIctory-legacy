@@ -91,8 +91,13 @@ GTX 1050 Ti's 4 GB VRAM is a substantial constraint. Shader Model 6.6 and
 Resource Binding Tier 3 support also depend on the installed D3D12 runtime and
 driver; Windows 10 may require a suitable Agility SDK runtime.
 
-When `VICTORY_MESH_FALLBACK=1` is set, `scripts/play.ps1` enables a stricter
-low-VRAM profile by default: title mode `1280x720`, no extra GPU-local
+When `VICTORY_MESH_FALLBACK=1` is set, or the executable is built with the
+`diag` profile, `scripts/play.ps1` enables a stricter low-VRAM profile by
+default. The diagnostic profile uses this preset for the GTX 1050 Ti
+crash-reproduction path because the runtime may select compute/vertex mesh
+fallback automatically when native mesh shaders are unavailable; no manual
+fallback flag is required. Explicit `VICTORY_*` values take precedence.
+Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
 title-buffer shadows, native host render/depth target dimensions
 (`VICTORY_RENDER_SCALE=1.0`), two dropped top mip levels on eligible large
 sampled textures, a 128 MiB aggregate local mesh-scratch cap, a 128 MiB idle
@@ -118,6 +123,38 @@ details, limitations, validation status, and the next acceptance gates. The
 [upstream GTX fallback PR #2203](https://github.com/Marvisak/VIctory/pull/2203)
 is a useful reference but is a separate, newer code line and is not merged
 wholesale into this repository.
+
+### Latest GTX 1050 Ti crash run (2026-11-26, 20:56 local / -06:00)
+
+The 2026-11-26 20:56 local run (-06:00) reached frame 2,876, then failed while recording a host texture-state
+prelude with D3D12 `E_OUTOFMEMORY (0x8007000E)`; the launcher exited with
+`0x887A0005`. The GPU-budget pressure handler did activate and texture staging
+had fallen to 24 MiB, so the previous residency guard was running but did not
+cover the larger remaining pools.
+
+The final memory sample reported about 4,280 MiB of local GPU use against a
+3,403 MiB DXGI budget; 1,567 MiB of physical RAM remained free. Host textures
+were about 2,860 MiB and host copies of title memory about 4,557 MiB. Mesh
+fallback scratch held 477 MiB in local buffers and 739 MiB in shared-memory
+buffers, including 236 MiB cached spare. Ten title-buffer copies also held
+about 492 MiB in card-local memory.
+
+The launcher header showed that no low-VRAM profile overrides or
+`VICTORY_D3D12_DEBUG` setting were active: only DRED was enabled. The runtime
+nevertheless used mesh fallback automatically. The old launcher nested both
+the low-VRAM preset and the debug-layer default under the explicit
+`VICTORY_MESH_FALLBACK=1` flag, so automatic fallback skipped both. The
+diagnostic launcher now applies the low-VRAM defaults to `diag` builds and
+enables the D3D12 debug layer on every `diag` launch. Explicit settings still
+win, and release launches remain unchanged unless the fallback flag is set.
+
+The host-prelude failure now names whether allocator reset, command-list reset,
+or list close failed, and reports the number of pre-copy barriers, final
+barriers, and texture-twin copies for context. Barrier and copy recording APIs
+return no error, so they are not reported as separate failure stages. The next
+run can therefore distinguish the failing D3D12 operation and include the
+debug layer's first validation message. This is a targeted mitigation and
+diagnostic improvement, not a claim that this particular OOM is fixed.
 
 ### Latest GTX 1050 Ti diagnostic (2026-11-26, follow-up run)
 
@@ -167,25 +204,24 @@ of a resource leak: the code's counter includes title-created host lists that
 have not been used/reset. They must not be forcibly reset while the title may
 still use them.
 
-For the next crash-focused diagnostics run, `scripts/play.ps1` now enables
-`VICTORY_D3D12_DEBUG=1` automatically when using the `diag` profile with
-`VICTORY_MESH_FALLBACK=1` (unless an explicit process value is already set).
+Every `diag` launch now enables `VICTORY_D3D12_DEBUG=1` automatically
+(unless an explicit process value is already set), independently of whether
+mesh fallback was requested manually or selected automatically by the runtime.
 This activates the D3D12 debug layer and records its first validation error
 when a command list fails to close. GPU-based validation
 (`VICTORY_D3D12_GBV`) remains opt-in because of its substantially higher
 overhead; the in-place memory probe remains read-only and
-`VICTORY_INPLACE` stays disabled. This change improves the evidence for the
-failure but does **not** claim the offending command has already been fixed.
-The next log should include the specific D3D12 validation message needed to
-select a safe code fix.
+`VICTORY_INPLACE` stays disabled. The launcher also applies the low-VRAM
+preset on `diag` builds, without forcing mesh fallback. The new host-prelude
+failure report names the exact recording step and counts its barriers and
+texture-twin copies. These changes improve the evidence and reduce expected
+VRAM pressure; they do **not** claim that the latest OOM is already resolved.
 
-For the next diagnostics build, the low-VRAM launcher now sets
-VICTORY_INPLACE_PROBE=2 by default (unless explicitly overridden). The
-probe tests whether this driver can expose eligible title-owned private memory
-directly to D3D12, and records memory eligibility/census results at 30 and 150
-seconds. It does not enable VICTORY_INPLACE; that option pins title-owned
-pages and can change memory lifetime, so it should only be enabled after the
-probe shows that the driver supports it and enough memory is eligible.
+The in-place memory probe remains opt-in for crash-reproduction runs:
+its periodic census and temporary heap-opening test add extra work and can
+temporarily keep title pages resident. VICTORY_INPLACE remains disabled.
+Only enable VICTORY_INPLACE_PROBE in a separate experiment when measuring
+whether this driver can expose eligible title-owned memory directly to D3D12.
 
 ### Compatibility-layer research
 

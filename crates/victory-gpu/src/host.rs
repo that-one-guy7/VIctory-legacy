@@ -5156,23 +5156,33 @@ impl HostList {
         };
         // SAFETY: the prelude is not executing (every submission is waited
         // for); the textures are live.
+        let mut stage = "resetting the prelude allocator";
         let recorded = unsafe {
             allocator.Reset().and_then(|()| {
+                stage = "resetting the prelude command list";
                 list.Reset(allocator, None)?;
                 if !to_copy.is_empty() {
                     list.ResourceBarrier(&to_copy);
                 }
-                for (depth, twin, colour) in &syncs {
-                    record_twin_copy(list, &depth.texture, twin, *colour);
+                if !syncs.is_empty() {
+                    for (depth, twin, colour) in &syncs {
+                        record_twin_copy(list, &depth.texture, twin, *colour);
+                    }
                 }
                 if !barriers.is_empty() {
                     list.ResourceBarrier(&barriers);
                 }
+                stage = "closing the prelude command list";
                 list.Close()
             })
         };
         if let Err(e) = recorded {
-            fail(format_args!("a host state prelude did not record ({e})"));
+            fail(format_args!(
+                "a host state prelude failed while {stage} ({e}); {} pre-copy barriers, {} final barriers, {} texture-twin copies",
+                to_copy.len(),
+                barriers.len(),
+                syncs.len(),
+            ));
         }
         list.cast().ok()
     }

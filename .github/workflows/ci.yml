@@ -75,6 +75,8 @@ jobs:
             "agility_sdk_expected",
             "exit_code=",
             'VICTORY_D3D12_DEBUG = "1"',
+            '$UseLowVramProfile = ($env:VICTORY_MESH_FALLBACK -eq "1") -or ($ProfileName -eq "diag")',
+            "low_vram_profile=",
             'VICTORY_D3D12_DRED = "1"'
           )) {
             if ($launcher -notmatch [regex]::Escape($required)) {
