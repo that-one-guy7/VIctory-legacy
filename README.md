@@ -97,7 +97,7 @@ default. The diagnostic profile uses this preset for the GTX 1050 Ti
 crash-reproduction path because the runtime may select compute/vertex mesh
 fallback automatically when native mesh shaders are unavailable; no manual
 fallback flag is required. Explicit `VICTORY_*` values take precedence.
-Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. title mode `1280x720`, no extra GPU-local
+Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
 title-buffer shadows, native host render/depth target dimensions
 (`VICTORY_RENDER_SCALE=1.0`), two dropped top mip levels on eligible large
 sampled textures, a 128 MiB aggregate local mesh-scratch cap, a 128 MiB idle
