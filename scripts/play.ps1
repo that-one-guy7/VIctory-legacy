@@ -100,7 +100,10 @@ if ($UseLowVramProfile) {
         # This profile is intentionally aggressive for 4 GB-class adapters.
         # These only affect eligible host-side resources; the title's own
         # resource descriptions and required mesh/indirect allocations remain intact.
-        VICTORY_RENDER_SCALE = "1.0"
+        # The log showed 2560x1440 host targets and a 3.6 GB GPU allocation
+        # on a 4 GB adapter. Half-size eligible targets use one quarter
+        # of the pixel area while the title still presents at 1280x720.
+        VICTORY_RENDER_SCALE = "0.5"
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
         # Drop one additional top mip from eligible large sampled textures.
         VICTORY_TEXTURE_MIP_DROP = "3"
@@ -127,6 +130,15 @@ if ($UseLowVramProfile) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
+    # The latest GTX 1050 Ti log hung while one synchronous submission contained
+    # 12 host lists (2.6 s). For diagnostics, submit and wait each host list
+    # separately, with command timestamps, so large batches cannot hide the
+    # slow list. This is diagnostics-only and adds synchronization overhead.
+    if ($ProfileName -eq "diag" -and
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_GPU_TIMING", "Process"))) {
+        $env:VICTORY_GPU_TIMING = "1"
+    }
+
     # Keep diagnostic runs synchronous unless the experimental overlap path is explicitly requested.
     # This restores ordinary per-present black-frame readback and avoids inheriting stale async settings
     # from an earlier PowerShell session while the GTX 1050 Ti rendering regression is isolated.
@@ -181,7 +193,7 @@ if ($ProfileName -eq "diag" -and
     $env:VICTORY_D3D12_DRED = "1"
 }
 if ($ProfileName -eq "diag") {
-    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG." -ForegroundColor Cyan
+    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$env:VICTORY_GPU_TIMING." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
