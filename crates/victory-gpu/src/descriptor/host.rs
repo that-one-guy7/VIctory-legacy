@@ -1340,9 +1340,10 @@ impl HostHeap {
                 };
                 // Never 0, which means "not fingerprinted yet".
                 let print = record_print(record) | 1;
-                // An unchanged record, or a never-seen all-zero slot, is
-                // already represented by the null descriptor in the host heap.
-                if *last == print || (*last == 0 && record.iter().all(|&byte| byte == 0)) {
+                // A record already reconciled is done. Even a first-seen
+                // all-zero record must pass through mirror(): the host slot may
+                // still contain an older descriptor made through the API path.
+                if *last == print {
                     continue;
                 }
                 *last = print;
