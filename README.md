@@ -156,40 +156,42 @@ still need individual support, and barycentric-dependent pixel shaders are
 still refused on adapters without that feature. No claim is made that all 3D
 lighting will render until a new GTX 1050 Ti run confirms it.
 
-### Native FSPX compute pipelines and frame overlap
+### Native FSPX compute experiment and GPU overlap
 
-The Xbox D3D12 device method at slot `0x218` is
-`DeserializeComputePipelineStateX`. It supplies precompiled RDNA2 compute
-program sections (FSPX packet, optional metadata/hash, code, and resource
-metadata), rather than a DXIL shader blob. The wrapper now assembles those
-sections into an `ACCC` container, parses FSPX native compute metadata, and
-routes the program through the existing compute-shader translator. This
-addresses a concrete missing-pipeline path that the diagnostic log showed
-being called repeatedly. The implementation is covered by parser and device
-method unit tests, but the real game's complete FSPX corpus still needs
-hardware validation.
+The native FSPX compute handler for device slot `0x218` assembles
+precompiled RDNA2 sections (packet, metadata, code and resource records) into
+an `ACCC` container and sends the program through the native compute
+translator. This code path is **experimental and disabled by default**.
+Without `VICTORY_EXPERIMENTAL_FSPX=1`, the slot keeps its previous
+`E_NOTIMPL` behavior so the title can select its fallback path. Set that
+variable to `1` only for a controlled comparison.
 
-As of the 2026-11-27 GTX 1050 Ti run, asynchronous overlap is
-**not enabled by default** in the diagnostic low-VRAM profile. That run had
-`VICTORY_LATE_WAIT=2` and `VICTORY_RELAY=2`, recorded 888 shader translation
-failures (886 compute and 2 pixel), and ended in
-`DXGI_ERROR_DEVICE_HUNG` after 12 submissions / 78 host lists were in flight.
-Those facts show that the overlap experiment and shader-coverage failures
-were both present; they do not prove that overlap alone caused the black 3D
-output. The launcher now forces `VICTORY_LATE_WAIT=0` and
-`VICTORY_RELAY=0` for diagnostic low-VRAM runs unless
-`VICTORY_GPU_OVERLAP=1` is explicitly set. This gives the next test the
-synchronous submission path and restores the per-present black-frame
-readback, while keeping the FSPX parser and compute-pipeline support intact.
+The default-off policy is deliberate. An independent test of GTA VI
+`1.0.2.1` on another VIctory branch found that enabling the slot-0x218
+handler increased dropped draws from an average of 82 to 1,440 per frame.
+The title was using the handler for its own compute pipelines, not just the
+FidelityFX upscaler; untranslated programs caused the world to render black.
+See [upstream issue #2394 / PR #2396](https://github.com/Marvisak/VIctory/pull/2396)
+for the test report. The 2026-11-27 GTX 1050 Ti log likewise records 958
+shader translation failures: 553 descriptors changed after loading and 207
+descriptors could not be traced as loaded or built. Keeping the handler
+enabled would accept these pipeline objects even though their shaders cannot
+be translated, suppressing the title's fallback behavior.
 
-The async path remains available for controlled A/B testing. It can keep more
-work in flight, increases the importance of correct shader-write copy-back,
-and stage 3 omits the diagnostics-only per-present black-frame readback.
-This rollback is an isolation step, **not proof that shader translation or
-the black 3D scene is fixed**. The unsupported compute descriptor/address
-patterns and the two barycentric-dependent pixel shaders remain separate
-renderer-coverage issues to investigate if the synchronous test is still
-black.
+Other independent blockers remain: the same log records 16,384 calls to
+unimplemented device slot `0x1c8`, and 10 pixel-shader creation failures
+because the GTX 1050 Ti does not support the shaders' barycentric inputs.
+The default-off FSPX change does not implement either path and does not
+claim that all 3D rendering is fixed.
+
+As of the 2026-11-27 GTX 1050 Ti run, asynchronous overlap is also
+**not enabled by default** in the diagnostic low-VRAM profile. The latest
+run had `VICTORY_LATE_WAIT=0` and `VICTORY_RELAY=0`; it still recorded
+black frames and shader translation failures. The launcher forces both
+settings to zero unless `VICTORY_GPU_OVERLAP=1` is explicitly set, restoring
+the per-present black-frame readback. The async path remains available for
+controlled A/B testing; it can keep more work in flight and stage 3 omits the
+diagnostics-only per-present black-frame readback.
 
 ### Follow-up GTX 1050 Ti crash run before PR #32 (2026-11-26, 21:54 local / -06:00)
 
