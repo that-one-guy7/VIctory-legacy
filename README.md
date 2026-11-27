@@ -106,8 +106,9 @@ fallback automatically when native mesh shaders are unavailable; no manual
 fallback flag is required. Explicit `VICTORY_*` values take precedence.
 Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
 title-buffer shadows, native host render/depth target dimensions
-(`VICTORY_RENDER_SCALE=1.0`), two dropped top mip levels on eligible large
-sampled textures, a 1 MiB grid for length-bounded title-memory windows
+(`VICTORY_RENDER_SCALE=1.0`), three dropped top mip levels on eligible large
+sampled textures, batched validation for adjacent one-record indirect draws
+(`VICTORY_INDIRECT_WINDOW=1`), a 1 MiB grid for length-bounded title-memory windows
 (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
 128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
 cache, and a 70% local-memory threshold for optional UAV optimizations. The
@@ -129,6 +130,42 @@ preserved. Texture mip dropping still reduces eligible sampled textures.
 These changes can reduce image quality and performance, do not cap every
 D3D12 allocation, and do not guarantee correct rendering or playable
 performance.
+
+### GTX 1050 Ti recovery and low-VRAM follow-up (2026-11-27)
+
+Disabling native FSPX compute handling restored visible 3D output in the latest
+GTX 1050 Ti run, but it is still not a playable result. The run reached about
+0.5 FPS and ended when closing a D3D12 prelude command list returned
+`E_OUTOFMEMORY (0x8007000E)`. At the final sample, local GPU memory was
+3,735 MiB against a 3,403 MiB budget; host textures were 3,153 MiB, including
+2,702 MiB of host copies the game renders to or writes. Host copies of title
+memory held another 4,565 MiB, and the PC had about 1,227 MiB physical memory
+free. The adapter was over budget; this was not a page-file commit-limit error.
+
+The low-VRAM profile now tries three dropped top mip levels on eligible large
+sampled textures and enables bounded indirect-record windowing. The latter
+can collapse repeated per-record validation dispatches for adjacent
+one-record indirect draws; it does not batch mesh shaders themselves. These
+are measured-risk settings, not a claim that the OOM is fixed. Host render
+target scaling remains at 1.0: the existing scaling experiment can skip copies
+when source and destination resources use different scales, so enabling it by
+default could reintroduce missing lighting or other output.
+
+The same run shows four compute pipelines refused because the GTX 1050 Ti
+supports 32-lane host waves while those translated shaders request wave64.
+It also records three compute translation failures for `v_cvt_f32_f64` and
+one divergent lane-mask refusal. These are concrete shader-compatibility gaps
+that may account for some missing lighting; the log does not identify those
+four wave64 shaders as the sole source of the remaining lighting defects.
+The packed-light texture alias path is active in this run, so disabling it is
+not an appropriate workaround. The next wave64 investigation should record
+`VICTORY_WAVE_WHY=1` and decide whether each program can be correctly
+lowered across two wave32 halves; forcing wave32 indiscriminately is unsafe.
+
+For meaningful frame-time comparisons, use a release executable. The
+diagnostic executable enables the D3D12 debug layer and DRED and adds
+substantial tracing and memory accounting; its 0.5 FPS is not a clean
+release-performance measurement.
 
 ### Black 3D output follow-up (2026-11-26 23:10 local / -06:00)
 

@@ -101,10 +101,13 @@ if ($UseLowVramProfile) {
         # resource descriptions and required mesh/indirect allocations remain intact.
         VICTORY_RENDER_SCALE = "1.0"
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
-        VICTORY_TEXTURE_MIP_DROP = "2"
+        # Drop one additional top mip from eligible large sampled textures.
+        VICTORY_TEXTURE_MIP_DROP = "3"
         VICTORY_TEXTURE_MIP_DROP_MIN_SIZE = "1024"
         # The regular window grid is 4 MiB; use 1 MiB for length-bounded host copies.
         VICTORY_WINDOW_KB = "1024"
+        # Batch clamping for adjacent one-record indirect draws (bounded at 64 records).
+        VICTORY_INDIRECT_WINDOW = "1"
         VICTORY_MESH_LOCAL_BUDGET_MB = "128"
         # Keep only a small idle shared-scratch cache on systems with limited RAM.
         VICTORY_MESH_SHARED_SPARE_MB = "32"
@@ -145,7 +148,7 @@ if ($UseLowVramProfile) {
     } else {
         Write-Host "Native FSPX compute handling: disabled; slot 0x218 keeps its previous E_NOTIMPL fallback behavior." -ForegroundColor Cyan
     }
-    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; indirect windowing=$env:VICTORY_INDIRECT_WINDOW; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
         Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
     }
