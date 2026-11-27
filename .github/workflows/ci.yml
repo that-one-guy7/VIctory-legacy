@@ -66,6 +66,17 @@ jobs:
           # Keep the launcher report useful as new switches are added, and
           # ensure it does not regress to dumping the entire process environment.
           $launcher = Get-Content -LiteralPath "scripts\play.ps1" -Raw
+          $hostSource = Get-Content -LiteralPath "crates\victory-gpu\src\host.rs" -Raw
+          foreach ($requiredHost in @(
+            "fn submission_batch_lists_value",
+            'std::env::var("VICTORY_GPU_BATCH_LISTS")',
+            "firsts.len().div_ceil(batch_size)",
+            "batch_limit_defaults_and_rejects_unsafe_values"
+          )) {
+            if ($hostSource -notmatch [regex]::Escape($requiredHost)) {
+              throw "Diagnostics host batching is missing required behavior: $requiredHost"
+            }
+          }
           foreach ($required in @(
             "VICTORY_*",
             "GetEnvironmentVariables",
@@ -88,6 +99,8 @@ jobs:
             'VICTORY_INDIRECT_WINDOW = "0"',
             'VICTORY_MESH_SHARED_SPARE_MB = "32"',
             'VICTORY_DSTORAGE_WORKERS = "3"',
+            'VICTORY_GPU_BATCH_LISTS = "2"',
+            'VICTORY_GPU_BATCH_LISTS_OVERRIDE -ne "1"',
             'VICTORY_PIPELINE_WORKERS = $(if ($PipelineJournalEnabled) { "1" } else { "2" })',
             'VICTORY_EXPERIMENTAL_FSPX = "0"',
             'VICTORY_PIPELINE_JOURNAL',
