@@ -84,7 +84,8 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
 # adapter lacks native mesh shaders. The launcher cannot know that decision
 # before D3D12 device creation, so the diagnostic profile also gets the
 # conservative low-VRAM defaults used by this GTX 1050 Ti crash-repro setup.
-# Explicit user values always take precedence; release launches are unchanged
+# Explicit resource-tuning values take precedence. The GPU-overlap experiment
+# is separately opt-in with VICTORY_GPU_OVERLAP=1; release launches are unchanged
 # unless VICTORY_MESH_FALLBACK=1 is explicitly requested.
 $UseLowVramProfile = ($env:VICTORY_MESH_FALLBACK -eq "1") -or ($ProfileName -eq "diag")
 if ($UseLowVramProfile) {
