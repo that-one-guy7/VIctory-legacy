@@ -7,10 +7,11 @@
 //!
 //! The entry is our own encoding of [`HostShader`]: a field added to it
 //! must be added to `encode` and `decode` too (entries of older builds
-//! are ignored anyway).
+//! are ignored anyway). A translation refusal is cached with its reason as
+//! well: the same build and container will fail the same way again.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use victory_pipeline::{Cache, Converter};
@@ -104,6 +105,9 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
 struct Translate<F> {
     translate: F,
     ran: AtomicBool,
+    /// Keep a fresh conversion in memory so a cache write/read failure does
+    /// not translate the same input twice in this call.
+    made: Mutex<Option<Result<HostShader, String>>>,
 }
 
 impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Translate<F> {
@@ -116,8 +120,13 @@ impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Tra
     }
     fn convert(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
         self.ran.store(true, Ordering::Relaxed);
-        let shader = (self.translate)(&input[32..]).map_err(anyhow::Error::msg)?;
-        Ok(encode(&shader))
+        let made = (self.translate)(&input[32..]);
+        let bytes = match &made {
+            Ok(shader) => encode(shader),
+            Err(reason) => encode_failure(reason),
+        };
+        *self.made.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
+        Ok(bytes)
     }
 }
 
@@ -131,29 +140,101 @@ fn cached(
     let converter = Translate {
         translate,
         ran: AtomicBool::new(false),
+        made: Mutex::new(None),
+    };
+    let take_made = || {
+        converter
+            .made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     };
     for _ in 0..2 {
-        let path = cache
-            .get_or_convert(&converter, &input)
-            .map_err(|e| format!("{e:#}"))?;
-        if let Some(shader) = std::fs::read(&path).ok().and_then(|b| decode(&b)) {
-            let (counter, what) = if converter.ran.load(Ordering::Relaxed) {
-                (&MISSES, "translated and cached")
+        let path = match cache.get_or_convert(&converter, &input) {
+            Ok(path) => path,
+            Err(e) => {
+                // The cache is a convenience. Preserve the translation's
+                // actual refusal if the cache directory cannot be written.
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "shader cache entry not written"
+                );
+                break;
+            }
+        };
+        // A just-translated entry is already in memory; do not immediately
+        // read it back from disk (or lose the real error if that read fails).
+        if let Some(result) = take_made() {
+            if result.is_ok() {
+                MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            return result;
+        }
+        let result = std::fs::read(&path).ok().and_then(|bytes| {
+            decode(&bytes)
+                .map(Ok)
+                .or_else(|| decode_failure(&bytes).map(Err))
+        });
+        if let Some(result) = result {
+            if result.is_ok() {
+                let (counter, what) = if converter.ran.load(Ordering::Relaxed) {
+                    (&MISSES, "translated and cached")
+                } else {
+                    (&HITS, "from the cache")
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(path = %path.display(), "shader {what}");
             } else {
-                (&HITS, "from the cache")
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(path = %path.display(), "shader {what}");
-            return Ok(shader);
+                tracing::debug!(path = %path.display(), "shader refusal from the cache");
+            }
+            return result;
         }
         tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
         let _ = std::fs::remove_file(&path);
     }
-    MISSES.fetch_add(1, Ordering::Relaxed);
-    (converter.translate)(container)
+    // If the converter ran but publishing its bytes failed, return that
+    // result instead of needlessly translating the same shader again.
+    let result = take_made().unwrap_or_else(|| (converter.translate)(container));
+    if result.is_ok() {
+        MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    result
 }
 
 const MAGIC: &[u8; 4] = b"VSH1";
+/// A cached refusal: marker, text length, BLAKE3 checksum, then UTF-8 reason.
+const FAILED: &[u8; 4] = b"VSF2";
+const FAILURE_LENGTH_BYTES: usize = 4;
+const FAILURE_CHECK_BYTES: usize = 4;
+
+fn failure_checksum(text: &[u8]) -> [u8; FAILURE_CHECK_BYTES] {
+    blake3::hash(text).as_bytes()[..FAILURE_CHECK_BYTES]
+        .try_into()
+        .expect("fixed checksum size")
+}
+
+fn encode_failure(reason: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(
+        FAILED.len() + FAILURE_LENGTH_BYTES + FAILURE_CHECK_BYTES + reason.len(),
+    );
+    bytes.extend_from_slice(FAILED);
+    bytes.extend_from_slice(&(reason.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&failure_checksum(reason.as_bytes()));
+    bytes.extend_from_slice(reason.as_bytes());
+    bytes
+}
+
+fn decode_failure(bytes: &[u8]) -> Option<String> {
+    let rest = bytes.strip_prefix(FAILED.as_slice())?;
+    let (header, text) = rest.split_at_checked(FAILURE_LENGTH_BYTES + FAILURE_CHECK_BYTES)?;
+    let length = u32::from_le_bytes(header[..FAILURE_LENGTH_BYTES].try_into().ok()?) as usize;
+    if text.len() != length
+        || failure_checksum(text).as_slice() != &header[FAILURE_LENGTH_BYTES..]
+    {
+        return None;
+    }
+    String::from_utf8(text.to_vec()).ok()
+}
 const STAGES: [HwStage; 8] = [
     HwStage::Ls,
     HwStage::Hs,
@@ -387,9 +468,52 @@ mod tests {
         assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
         assert_eq!(runs.load(Ordering::Relaxed), 3);
 
-        // Failures are not stored.
-        let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
-        assert!(cached(&cache, &build, b"other", fail).is_err());
+        // A refused shader is cached with its reason. A second request
+        // returns the same refusal without invoking the translator again.
+        let fail_runs = AtomicU64::new(0);
+        let fail = |_: &[u8]| {
+            fail_runs.fetch_add(1, Ordering::Relaxed);
+            Err::<HostShader, _>("unsupported".to_owned())
+        };
+        let refusal = Err("unsupported".to_owned());
+        assert_eq!(cached(&cache, &build, b"other", fail), refusal);
+        assert_eq!(cached(&cache, &build, b"other", fail), refusal);
+        assert_eq!(fail_runs.load(Ordering::Relaxed), 1);
+
+        // Corrupted refusal data is treated as a cache miss and retried.
+        for entry in walk(dir.path()) {
+            if std::fs::read(&entry)
+                .is_ok_and(|bytes| bytes.starts_with(FAILED))
+            {
+                std::fs::write(&entry, [FAILED.as_slice(), &[0xff, 0xfe]].concat()).unwrap();
+            }
+        }
+        assert_eq!(cached(&cache, &build, b"other", fail), refusal);
+        assert_eq!(fail_runs.load(Ordering::Relaxed), 2);
+        assert_eq!(cached(&cache, &build, b"other", fail), refusal);
+        assert_eq!(fail_runs.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn refusal_entries_round_trip_and_reject_damage() {
+        let reason = "GFX10 code at 0x10: barycentric input is not supported";
+        let encoded = encode_failure(reason);
+        assert_eq!(decode_failure(&encoded).as_deref(), Some(reason));
+        assert_eq!(decode(&encoded), None);
+
+        for len in [
+            FAILED.len(),
+            FAILED.len() + FAILURE_LENGTH_BYTES,
+            encoded.len() - 1,
+        ] {
+            assert_eq!(decode_failure(&encoded[..len]), None);
+        }
+
+        let mut changed = encoded.clone();
+        let at = FAILED.len() + FAILURE_LENGTH_BYTES + FAILURE_CHECK_BYTES + 1;
+        changed[at] ^= 1;
+        assert_eq!(decode_failure(&changed), None);
+        assert_eq!(decode_failure(b"VSH1not a refusal"), None);
     }
 
     fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
