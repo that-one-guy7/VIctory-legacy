@@ -148,6 +148,12 @@ if ($UseLowVramProfile) {
         $env:VICTORY_CARD_BUFFERS_MB = "128"
     }
 
+    # Render-target scaling can skip mixed-size copies. Keep it native unless
+    # the caller explicitly opts into the documented controlled experiment.
+    if ($UseLowVramProfile -and $env:VICTORY_RENDER_SCALE_OVERRIDE -ne "1") {
+        $env:VICTORY_RENDER_SCALE = "1.0"
+    }
+
     # Per-list GPU timing fences every host list and severely reduced GPU
     # throughput in the latest run. Keep it off by default; opt in explicitly
     # for a focused TDR trace with VICTORY_GPU_TIMING_OVERRIDE=1.
