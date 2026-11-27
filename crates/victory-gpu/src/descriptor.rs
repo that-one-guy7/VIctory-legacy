@@ -183,7 +183,7 @@ pub(crate) fn descriptor_sync_line(frames: f64) {
         return;
     }
     tracing::info!(
-        "descriptor page sync per frame: {:.1} changed pages; {:.0} records inspected;          {:.0} records remade; {:.2} ms",
+        "descriptor page sync per frame: {:.1} changed pages; {:.0} records inspected; {:.0} records remade; {:.2} ms",
         pages as f64 / frames,
         looked as f64 / frames,
         remade as f64 / frames,
