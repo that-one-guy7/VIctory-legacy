@@ -5,6 +5,7 @@ This feature is opt-in and disabled by default. It changes only the D3D12 host c
 ## Settings
 
 ```powershell
+$env:VICTORY_RENDER_SCALE_OVERRIDE = "1"
 $env:VICTORY_RENDER_SCALE = "0.5"
 $env:VICTORY_RENDER_SCALE_MIN_SIZE = "512"
 ```
@@ -27,12 +28,12 @@ Do not treat a successful build or a non-black frame as proof of correctness. Co
 
 ## Low-VRAM profile note
 
-The automatic `VICTORY_MESH_FALLBACK=1` profile leaves this feature disabled
-(`VICTORY_RENDER_SCALE=1.0`). A GTX 1050 Ti runtime log showed a
-`CopyResource` skipped because the source and destination targets had
-different scales. Until mixed-scale copy paths can be converted safely, keep
-render-target scaling opt-in and verify the same scene for skipped-copy
-warnings whenever testing a value below 1.0.
+The low-VRAM launcher profiles force native host target dimensions
+(`VICTORY_RENDER_SCALE=1.0`) unless `VICTORY_RENDER_SCALE_OVERRIDE=1` is set.
+A GTX 1050 Ti runtime log showed a `CopyResource` skipped because the source
+and destination targets had different scales. Until mixed-scale copy paths can
+be converted safely, keep render-target scaling opt-in and verify the same
+scene for skipped-copy warnings whenever testing a value below 1.0.
 
 ## Test
 
@@ -41,6 +42,7 @@ From the repository root on Windows:
 ```powershell
 cargo build --profile diag -p victory --features diagnostics --locked
 
+$env:VICTORY_RENDER_SCALE_OVERRIDE = "1"
 $env:VICTORY_RENDER_SCALE = "0.5"
 $env:VICTORY_RENDER_SCALE_MIN_SIZE = "512"
 & ".\scripts\play.ps1" -Exe ".\target\diag\victory.exe" -Game "<your game exe>"
@@ -49,6 +51,7 @@ $env:VICTORY_RENDER_SCALE_MIN_SIZE = "512"
 For the first test, use the same game scene and other environment settings as the baseline run. Upload `%TEMP%\ztrx.log` after the test. To return to native host target sizes:
 
 ```powershell
+Remove-Item Env:VICTORY_RENDER_SCALE_OVERRIDE -ErrorAction SilentlyContinue
 Remove-Item Env:VICTORY_RENDER_SCALE -ErrorAction SilentlyContinue
 Remove-Item Env:VICTORY_RENDER_SCALE_MIN_SIZE -ErrorAction SilentlyContinue
 ```
