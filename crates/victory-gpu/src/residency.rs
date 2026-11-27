@@ -81,25 +81,24 @@ fn gpu_budget_pressure(budget: u64, used: u64, percent: u64) -> bool {
 /// Called by the once-per-second host maintenance sweep.
 pub(crate) fn refresh() {
     let now = crate::host::now_ms();
-    let Some((physical, commit)) = sample_memory(now) else {
-        return;
-    };
-    let was = PRESSURED.load(Ordering::Relaxed);
-    let pressure = next_pressure(was, physical, commit);
-    if pressure != was {
-        PRESSURED.store(pressure, Ordering::Relaxed);
-        if pressure {
-            tracing::warn!(
-                physical_free_mib = physical / MIB,
-                available_commit_mib = commit / MIB,
-                "host memory pressure: shortening idle-copy retention; required rendering allocations remain enabled"
-            );
-        } else {
-            tracing::info!(
-                physical_free_mib = physical / MIB,
-                available_commit_mib = commit / MIB,
-                "host memory pressure cleared"
-            );
+    if let Some((physical, commit)) = sample_memory(now) {
+        let was = PRESSURED.load(Ordering::Relaxed);
+        let pressure = next_pressure(was, physical, commit);
+        if pressure != was {
+            PRESSURED.store(pressure, Ordering::Relaxed);
+            if pressure {
+                tracing::warn!(
+                    physical_free_mib = physical / MIB,
+                    available_commit_mib = commit / MIB,
+                    "host memory pressure: shortening idle-copy retention; required rendering allocations remain enabled"
+                );
+            } else {
+                tracing::info!(
+                    physical_free_mib = physical / MIB,
+                    available_commit_mib = commit / MIB,
+                    "host memory pressure cleared"
+                );
+            }
         }
     }
 
@@ -222,17 +221,27 @@ fn pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
     }
 }
 
+fn gpu_pressure_idle_timeout_ms(pressured: bool, normal: u64) -> u64 {
+    if pressured { normal.min(GPU_PRESSURE_IDLE_MS) } else { normal }
+}
+
+fn gpu_pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
+    if pressured { normal.min(GPU_PRESSURE_IDLE_FRAMES) } else { normal }
+}
+
 pub(crate) fn idle_timeout_ms(normal: u64) -> u64 {
-    if GPU_PRESSURED.load(Ordering::Relaxed) {
-        normal.min(GPU_PRESSURE_IDLE_MS)
+    let gpu = GPU_PRESSURED.load(Ordering::Relaxed);
+    if gpu {
+        gpu_pressure_idle_timeout_ms(gpu, normal)
     } else {
         pressure_idle_timeout_ms(PRESSURED.load(Ordering::Relaxed), normal)
     }
 }
 
 pub(crate) fn idle_timeout_frames(normal: u64) -> u64 {
-    if GPU_PRESSURED.load(Ordering::Relaxed) {
-        normal.min(GPU_PRESSURE_IDLE_FRAMES)
+    let gpu = GPU_PRESSURED.load(Ordering::Relaxed);
+    if gpu {
+        gpu_pressure_idle_timeout_frames(gpu, normal)
     } else {
         pressure_idle_timeout_frames(PRESSURED.load(Ordering::Relaxed), normal)
     }
@@ -278,7 +287,9 @@ mod tests {
         assert_eq!(2_500, pressure_idle_timeout_ms(true, 10_000));
         assert_eq!(2, pressure_idle_timeout_frames(true, 4));
         assert_eq!(4, pressure_idle_timeout_frames(false, 4));
-        assert_eq!(1_000, GPU_PRESSURE_IDLE_MS.min(10_000));
-        assert_eq!(1, GPU_PRESSURE_IDLE_FRAMES.min(4));
+        assert_eq!(1_000, gpu_pressure_idle_timeout_ms(true, 10_000));
+        assert_eq!(10_000, gpu_pressure_idle_timeout_ms(false, 10_000));
+        assert_eq!(1, gpu_pressure_idle_timeout_frames(true, 4));
+        assert_eq!(4, gpu_pressure_idle_timeout_frames(false, 4));
     }
 }
