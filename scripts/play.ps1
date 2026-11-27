@@ -84,7 +84,8 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
 # adapter lacks native mesh shaders. The launcher cannot know that decision
 # before D3D12 device creation, so the diagnostic profile also gets the
 # conservative low-VRAM defaults used by this GTX 1050 Ti crash-repro setup.
-# Explicit user values always take precedence; release launches are unchanged
+# Explicit resource-tuning values take precedence. The GPU-overlap experiment
+# is separately opt-in with VICTORY_GPU_OVERLAP=1; release launches are unchanged
 # unless VICTORY_MESH_FALLBACK=1 is explicitly requested.
 $UseLowVramProfile = ($env:VICTORY_MESH_FALLBACK -eq "1") -or ($ProfileName -eq "diag")
 if ($UseLowVramProfile) {
@@ -110,14 +111,6 @@ if ($UseLowVramProfile) {
         # Leave CPU headroom for the title instead of saturating all logical processors.
         VICTORY_DSTORAGE_WORKERS = "3"
         VICTORY_PIPELINE_WORKERS = "2"
-        # Let the CPU prepare the next frame while the GPU finishes the previous present.
-        # Stage 3 skips the per-present black-frame diagnostic readback; explicit captures still synchronize.
-        VICTORY_LATE_WAIT = "3"
-        # The GTX 1050 Ti run reached 138 lists / 15 submissions ahead and exceeded its local-memory budget.
-        # Limit the queued backlog without disabling asynchronous CPU/GPU overlap.
-        VICTORY_LATE_WAIT_LISTS = "64"
-        # Copy shader-written title buffers back on a worker while submissions continue.
-        VICTORY_RELAY = "2"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
@@ -125,11 +118,35 @@ if ($UseLowVramProfile) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
+    # Keep diagnostic runs synchronous unless the experimental overlap path is explicitly requested.
+    # This restores ordinary per-present black-frame readback and avoids inheriting stale async settings
+    # from an earlier PowerShell session while the GTX 1050 Ti rendering regression is isolated.
+    $UseGpuOverlap = ($env:VICTORY_GPU_OVERLAP -eq "1")
+    if ($UseGpuOverlap) {
+        if ([string]::IsNullOrWhiteSpace($env:VICTORY_LATE_WAIT)) {
+            $env:VICTORY_LATE_WAIT = "3"
+        }
+        if ([string]::IsNullOrWhiteSpace($env:VICTORY_LATE_WAIT_LISTS)) {
+            $env:VICTORY_LATE_WAIT_LISTS = "64"
+        }
+        if ([string]::IsNullOrWhiteSpace($env:VICTORY_RELAY)) {
+            $env:VICTORY_RELAY = "2"
+        }
+    } else {
+        # Explicit opt-in is required because these process variables can persist between test runs.
+        $env:VICTORY_LATE_WAIT = "0"
+        $env:VICTORY_RELAY = "0"
+        Remove-Item Env:VICTORY_LATE_WAIT_LISTS -ErrorAction SilentlyContinue
+    }
     Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
         Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
     }
-    Write-Host "GPU overlap: VICTORY_LATE_WAIT=$env:VICTORY_LATE_WAIT; in-flight list cap=$env:VICTORY_LATE_WAIT_LISTS; copy-back relay=$env:VICTORY_RELAY (stage 3 skips the per-present black-frame diagnostic readback)." -ForegroundColor Cyan
+    if ($UseGpuOverlap) {
+        Write-Host "GPU overlap opt-in: VICTORY_LATE_WAIT=$env:VICTORY_LATE_WAIT; in-flight list cap=$env:VICTORY_LATE_WAIT_LISTS; copy-back relay=$env:VICTORY_RELAY." -ForegroundColor Cyan
+    } else {
+        Write-Host "GPU overlap disabled for diagnostics: VICTORY_LATE_WAIT=0; VICTORY_RELAY=0; per-present black-frame readback remains enabled." -ForegroundColor Cyan
+    }
     Write-Host "Length-bounded title-memory window grid: $env:VICTORY_WINDOW_KB KiB; unsized root views remain 4 MiB." -ForegroundColor Cyan
 }
 
