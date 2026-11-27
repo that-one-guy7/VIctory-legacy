@@ -130,6 +130,16 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     if !p.used.load(Ordering::Relaxed) && !p.used.swap(true, Ordering::Relaxed) {
         super::library::note_used(&p.key);
     }
+    // A refused stage cannot produce a host pipeline. Record the refusal
+    // immediately instead of consuming worker time and a frame's wait budget.
+    if p
+        .shaders
+        .iter()
+        .any(|shader| matches!(shader.translated.get(), Some(None)))
+    {
+        p.made.get_or_init(|| None);
+        return None;
+    }
     if p.made.get().is_none() {
         start(p, REQUESTED);
         wait(p, crate::frame::current());
@@ -461,6 +471,31 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+
+    /// A shader already refused by translation cannot make a host PSO:
+    /// skip the worker queue and its frame wait entirely.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_shader_skips_the_worker_queue() {
+        let shader = Arc::new(Shader {
+            stage: "pixel",
+            hash: "0123456789abcdef".to_owned(),
+            container: Vec::new(),
+            translated: OnceLock::new(),
+            mesh_fallback: OnceLock::new(),
+        });
+        assert!(shader.translated.set(None).is_ok());
+        let pending = Arc::new(Pending::new(vec![shader], None));
+        pending.used.store(true, Ordering::Relaxed);
+
+        assert!(ready(&pending).is_none());
+        assert_eq!(
+            pending.queue_state.load(Ordering::Relaxed),
+            NOT_QUEUED,
+            "refused pipeline must not be sent to a worker"
+        );
+        assert!(matches!(pending.made.get(), Some(None)));
     }
 
     #[test]
