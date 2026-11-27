@@ -1591,21 +1591,14 @@ impl Pool {
         Some(region)
     }
 
-    fn reset(&mut self) {
-        // The command list has finished. Keep local-VRAM scratch only while
-        // the adapter remains below the same 80% threshold used for new
-        // local allocations. Under memory pressure, release idle local chunks
-        // instead of retaining them indefinitely; later requests can use the
-        // shared-memory fallback until the adapter has headroom again.
-        let keep_local = host()
-            .and_then(|host| host.video_memory())
-            .map(|[budget, used, ..]| retain_idle_local_mesh_scratch(budget, used))
-            .unwrap_or(true);
+    fn reset(&mut self, keep_local: bool) {
         let mut local = Vec::with_capacity(self.chunks.len());
         for mut chunk in self.chunks.drain(..) {
             chunk.used = 0;
             if chunk.local {
                 if keep_local {
+                    // Keep the bounded local-VRAM pool while the adapter has
+                    // enough headroom for it to remain useful on the next list.
                     chunk.touched = false;
                     local.push(chunk);
                 } else {
@@ -4930,7 +4923,21 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
-        self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner()).pools.iter_mut().for_each(Pool::reset);
+        {
+            let mut mesh = self.mesh_scratch.lock().unwrap_or_else(|e| e.into_inner());
+            let has_local = mesh
+                .pools
+                .iter()
+                .any(|pool| pool.chunks.iter().any(|chunk| chunk.local));
+            // Query DXGI once per completed host list, not once per scratch pool.
+            // The list has finished every submission, so its local chunks are idle.
+            let keep_local = !has_local
+                || host()
+                    .and_then(|host| host.video_memory())
+                    .map(|[budget, used, ..]| retain_idle_local_mesh_scratch(budget, used))
+                    .unwrap_or(true);
+            mesh.pools.iter_mut().for_each(|pool| pool.reset(keep_local));
+        }
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
