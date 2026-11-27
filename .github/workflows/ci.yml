@@ -79,6 +79,7 @@ jobs:
             'VICTORY_MESH_SHARED_SPARE_MB = "32"',
             'VICTORY_DSTORAGE_WORKERS = "3"',
             'VICTORY_PIPELINE_WORKERS = "2"',
+            'VICTORY_LATE_WAIT = "3"',
             '$UseLowVramProfile = ($env:VICTORY_MESH_FALLBACK -eq "1") -or ($ProfileName -eq "diag")',
             "low_vram_profile=",
             'VICTORY_D3D12_DRED = "1"'
