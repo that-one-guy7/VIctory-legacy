@@ -436,6 +436,16 @@ pub(crate) fn is_texture_view(view: &View) -> bool {
 /// ([`buffer_view_ok`]), since the start.
 pub(crate) static REFUSED_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Whether a newly observed out-of-range descriptor index merits a log entry.
+/// Log once on the first observation and then at most once per 64K-slot bucket.
+const OUT_OF_RANGE_WARNING_SHIFT: u32 = 16;
+
+fn out_of_range_warning_due(previous: u32, index: u32) -> bool {
+    previous < index
+        && (previous == 0
+            || (previous >> OUT_OF_RANGE_WARNING_SHIFT) != (index >> OUT_OF_RANGE_WARNING_SHIFT))
+}
+
 /// Whether the host device is gone, and why (the first time it is asked
 /// after that): for passes that make many views, to name the one that did
 /// it.
@@ -1278,15 +1288,19 @@ impl HostHeap {
     /// data: a host copy of a buffer is made on first use.
     pub(crate) fn mirror(&self, index: u32, handle: u64, for_draw: bool) -> Option<View> {
         if index >= self.count {
-            // Diagnostic (NVIDIA heap cap): the highest title slot past the
-            // host heap seen so far.
+            // Diagnostic (NVIDIA heap cap): retain the highest title slot past
+            // the host heap, but report it only when it crosses a 64K-slot bucket.
+            // The title streams descriptors sequentially; warning on every new
+            // maximum flooded the log with near-identical messages and added
+            // avoidable CPU and disk I/O to the submission path.
             static HIGHEST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if HIGHEST.fetch_max(index, std::sync::atomic::Ordering::Relaxed) < index {
+            let previous = HIGHEST.fetch_max(index, std::sync::atomic::Ordering::Relaxed);
+            if out_of_range_warning_due(previous, index) {
                 tracing::warn!(
                     index,
                     count = self.count,
                     for_draw,
-                    "title slot past the host heap"
+                    "title slot past the host heap (reported at 64K-slot boundaries)"
                 );
             }
             return None;
@@ -2618,6 +2632,19 @@ mod tests {
         // Long after the last table, a write is due at once.
         heap.queue_texture(2, true, false, frame + 3 + TABLED_FRAMES);
         assert_eq!(slots(frame + 3 + TABLED_FRAMES), [2]);
+    }
+
+    #[test]
+    fn out_of_range_descriptor_warnings_are_throttled_by_64k_bucket() {
+        // The first out-of-range index is always reported, including small heaps.
+        assert!(out_of_range_warning_due(0, 7));
+        // Sequential indices in one bucket do not flood the log.
+        assert!(!out_of_range_warning_due(7, 8));
+        assert!(out_of_range_warning_due(737_855, 786_432));
+        assert!(!out_of_range_warning_due(737_855, 786_431));
+        // Lower or repeated maxima do not produce another warning.
+        assert!(!out_of_range_warning_due(786_432, 780_000));
+        assert!(!out_of_range_warning_due(786_432, 786_432));
     }
 
     #[test]
