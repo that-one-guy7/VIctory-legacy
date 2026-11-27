@@ -160,6 +160,63 @@ fn mirror(handle: u64) {
     }
 }
 
+/// Reconciles host-visible descriptors with whole slots the title wrote
+/// directly into its own shader-visible heap memory. Those writes bypass
+/// Create/CopyDescriptor calls, so API-call mirroring alone can leave a
+/// stale texture or buffer descriptor in the host heap.
+///
+/// Only pages reported changed since the previous reconciliation are
+/// mirrored. The caller holds the host submission lock and has settled
+/// earlier GPU submissions first, so a heap cannot be rewritten while
+/// earlier work is still reading its descriptors.
+#[cfg(windows)]
+pub(crate) fn resync_title_writes() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Held throughout: registered heaps stay alive while they are visited.
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    for &(start, end, at) in heaps.iter() {
+        // SAFETY: registered heaps are live (removed when dropped).
+        let heap = unsafe { &*(at as *const Heap) };
+        let (Some(Some(host)), Some(step)) =
+            (heap.host.get(), increment(heap.desc.kind))
+        else {
+            continue;
+        };
+
+        let page = crate::watch::PAGE as u64;
+        let first = start / page * page;
+        let last = end.div_ceil(page) * page;
+        let Some((now, written)) =
+            crate::watch::writes(first as usize, last as usize, true)
+        else {
+            continue;
+        };
+
+        let before = heap.synced.swap(now, Relaxed);
+        let step = u64::from(step);
+        for (page_number, asked) in written {
+            if asked <= before {
+                continue;
+            }
+            let from = (page_number as u64 * page).max(start);
+            let to = ((page_number as u64 + 1) * page).min(end);
+            if from >= to {
+                continue;
+            }
+
+            let first_slot = (from - start) / step;
+            let last_slot = (to - start).div_ceil(step);
+            for slot in first_slot..last_slot {
+                let index = slot as u32;
+                if index < heap.desc.count {
+                    host.mirror(index, start + u64::from(index) * step, false);
+                }
+            }
+        }
+    }
+}
+
 /// Flushes deferred descriptor unmakings on every live shader-visible heap
 /// once no GPU submission is executing.
 #[cfg(windows)]
