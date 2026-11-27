@@ -314,6 +314,10 @@ struct Lower<'a> {
     counters: HashMap<usize, (V, Vec<(V, usize)>)>,
     /// The block a loop stopped by [`LOOP_LIMIT`] leaves the program from.
     abort: Option<usize>,
+    /// The 16/64-bit rounding mode (MODE bits 3:2) at each block's entry.
+    round16: Vec<Option<u8>>,
+    /// The rounding mode in force at the current instruction.
+    mode16: Option<u8>,
 }
 
 /// Iterations after which a loop is left (per entry into it), unless
@@ -1244,6 +1248,63 @@ fn unsupported(offset: usize, what: Why) -> Stop {
     Stop::Fail(ShaderError::Unsupported { offset, what })
 }
 
+/// The 16/64-bit round mode (MODE bits 3:2: 0 nearest even, 3 toward zero)
+/// after an instruction, from the mode before it (None means not known).
+fn round16_after(inst: &Inst, mode: Option<u8>) -> Option<u8> {
+    match (inst.name(), &inst.fields) {
+        ("s_round_mode", Fields::Sopp { imm }) => Some((imm >> 2 & 3) as u8),
+        (
+            "s_setreg_imm32_b32" | "s_setreg_b32",
+            Fields::Sop {
+                src, imm: Some(h), ..
+            },
+        ) => {
+            let (id, off, size) = (h & 0x3F, h >> 6 & 0x1F, (h >> 11 & 0x1F) + 1);
+            if id != 1 || off >= 4 || off + size <= 2 {
+                return mode;
+            }
+            match src.first() {
+                Some(&Operand::Literal(x)) if off <= 2 && off + size >= 4 => {
+                    Some((x >> (2 - off) & 3) as u8)
+                }
+                _ => None,
+            }
+        }
+        _ => mode,
+    }
+}
+
+/// The round mode each block starts with: nearest-even at program start,
+/// updated by constant MODE writes, and unknown where control-flow paths disagree.
+fn round16(p: &crate::ir::Program) -> Vec<Option<u8>> {
+    let mut entry: Vec<Option<Option<u8>>> = vec![None; p.blocks.len()];
+    entry[0] = Some(Some(0));
+    let order = crate::ir::reverse_postorder(&p.blocks);
+    loop {
+        let mut changed = false;
+        for &b in &order {
+            let Some(mut mode) = entry[b] else { continue };
+            for inst in &p.blocks[b].insts {
+                mode = round16_after(inst, mode);
+            }
+            for successor in p.blocks[b].exit.successors() {
+                let next = match entry[successor] {
+                    None => Some(mode),
+                    Some(old) if old == mode => continue,
+                    Some(_) => Some(None),
+                };
+                if entry[successor] != next {
+                    entry[successor] = next;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return entry.into_iter().map(Option::flatten).collect();
+        }
+    }
+}
+
 impl<'a> Lower<'a> {
     fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
         let p = x.p;
@@ -1571,6 +1632,8 @@ impl<'a> Lower<'a> {
             code_table: None,
             counters: HashMap::new(),
             abort: None,
+            round16: round16(p),
+            mode16: Some(0),
         }
     }
 
@@ -2108,8 +2171,10 @@ impl<'a> Lower<'a> {
                 self.lds_meeting();
             }
             let mut i = 0;
+            self.mode16 = self.round16[b];
             while i < p.blocks[b].insts.len() {
                 self.inst(b, i)?;
+                self.mode16 = round16_after(&p.blocks[b].insts[i], self.mode16);
                 if let Some(end) = self.sections.get(&b).and_then(|s| s.get(&i)).map(|s| s.end) {
                     for j in i + 1..end {
                         self.section_inst(b, j, i);
@@ -7234,6 +7299,48 @@ impl<'a> Lower<'a> {
                 };
                 let r = self.s.m.cast(c, op, a, self.s.t.i32);
                 int(self, r)
+            }
+            "v_cvt_f32_f64" => {
+                // DXIL fptrunc uses round-to-nearest-even. MODE is tracked
+                // across blocks so directed or uncertain rounding is refused
+                // rather than silently translated with the wrong semantics.
+                if self.mode16 != Some(0) {
+                    return Err("a 64-bit conversion in a directed or unknown round mode");
+                }
+                self.s.flags |= flags::FLOAT64 | flags::INT64;
+                // RDNA2 encodes a literal source as the high word of binary64;
+                // the low word is zero.
+                let Fields::Valu(v) = &inst.fields else {
+                    return Err("a 64-bit source");
+                };
+                let i64t = self.s.m.int(64);
+                let x = match v.src.first().copied() {
+                    Some(Operand::Literal(word)) => {
+                        let literal = self.s.m.i32(word);
+                        let high = self.s.m.cast(c, Cast::ZExt, literal, i64t);
+                        let shift = self.s.m.int_const(i64t, 32);
+                        self.s.m.bin(c, Bin::Shl, high, shift)
+                    }
+                    Some(Operand::Const(code @ 240..=248)) => {
+                        let value = [
+                            0.5f64,
+                            -0.5,
+                            1.0,
+                            -1.0,
+                            2.0,
+                            -2.0,
+                            4.0,
+                            -4.0,
+                            1.0 / (2.0 * std::f64::consts::PI),
+                        ][usize::from(code - 240)];
+                        self.s.m.int_const(i64t, value.to_bits() as i64)
+                    }
+                    _ => self.src64(inst, 0)?,
+                };
+                let double = self.s.m.double();
+                let bits = self.s.m.cast(c, Cast::Bitcast, x, double);
+                let result = self.s.m.cast(c, Cast::FpTrunc, bits, self.s.t.f32);
+                float(self, result)
             }
             "v_cvt_f32_i32" | "v_cvt_f32_u32" | "v_cvt_f32_ubyte0" | "v_cvt_f32_ubyte1"
             | "v_cvt_f32_ubyte2" | "v_cvt_f32_ubyte3" => {
