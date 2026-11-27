@@ -1259,6 +1259,39 @@ fn timing() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_TIMING").is_some())
 }
 
+/// Maximum title host lists submitted before one fence wait. A small batch
+/// avoids the throughput cost of waiting after every list while preventing
+/// a large title submission from becoming one long D3D12 execution batch.
+#[cfg(feature = "diagnostics")]
+fn submission_batch_lists_value(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=16).contains(value))
+        .unwrap_or(2)
+}
+
+#[cfg(feature = "diagnostics")]
+fn submission_batch_lists() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        submission_batch_lists_value(std::env::var("VICTORY_GPU_BATCH_LISTS").ok().as_deref())
+    })
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+mod submission_batch_lists_tests {
+    use super::submission_batch_lists_value;
+
+    #[test]
+    fn batch_limit_defaults_and_rejects_unsafe_values() {
+        assert_eq!(submission_batch_lists_value(None), 2);
+        assert_eq!(submission_batch_lists_value(Some(" 3 ")), 3);
+        assert_eq!(submission_batch_lists_value(Some("1")), 1);
+        assert_eq!(submission_batch_lists_value(Some("0")), 2);
+        assert_eq!(submission_batch_lists_value(Some("17")), 2);
+        assert_eq!(submission_batch_lists_value(Some("many")), 2);
+    }
+}
+
 /// Names a host object for device-removed reports: allocations appear
 /// in page-fault data and command lists appear in DRED auto-breadcrumbs.
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
@@ -4400,7 +4433,10 @@ impl Host {
             working(was_working);
             return Some((submitted, sent));
         }
-        // Diagnostics: each list on its own, timed (`VICTORY_GPU_TIMING`).
+        // Diagnostics: either isolate and time each list, or submit bounded
+        // batches. Waiting once per small batch avoids the severe throughput
+        // penalty of per-list fences while keeping a large title submission
+        // from becoming one multi-second D3D12 execution batch.
         #[cfg(feature = "diagnostics")]
         let groups: Vec<&[Option<ID3D12CommandList>]> = if timing() {
             firsts
@@ -4409,7 +4445,21 @@ impl Host {
                 .map(|(&a, &b)| &lists[a..b])
                 .collect()
         } else {
-            vec![&lists[..]]
+            let batch_size = submission_batch_lists();
+            let mut groups = Vec::with_capacity(firsts.len().div_ceil(batch_size));
+            let mut at = 0;
+            while at < firsts.len() {
+                let next = (at + batch_size).min(firsts.len());
+                let start = firsts[at];
+                let end = firsts.get(next).copied().unwrap_or(lists.len());
+                groups.push(&lists[start..end]);
+                at = next;
+            }
+            if groups.is_empty() {
+                vec![&lists[..]]
+            } else {
+                groups
+            }
         };
         #[cfg(not(feature = "diagnostics"))]
         let groups = [&lists[..]];

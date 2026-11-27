@@ -92,18 +92,19 @@ $PipelineJournalEnabled = ![string]::IsNullOrWhiteSpace($env:VICTORY_PIPELINE_JO
 if ($UseLowVramProfile) {
     $MeshFallbackDefaults = [ordered]@{
         VICTORY_DISPLAY_MODE = "1280x720"
-        VICTORY_CARD_BUFFERS = "0"
+        # Large title-buffer copies may live in local GPU memory when the
+        # adapter has safe headroom. The runtime caps these at 128 MiB and
+        # falls back to CPU-backed copies when its budget checks refuse them.
+        VICTORY_CARD_BUFFERS = "1"
+        VICTORY_CARD_BUFFERS_MIN_MB = "64"
+        VICTORY_CARD_BUFFERS_MB = "128"
         VICTORY_CARD_REHASH_RUNS = "1"
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
         VICTORY_WIDE_REFRESH = "1"
-        # This profile is intentionally aggressive for 4 GB-class adapters.
-        # These only affect eligible host-side resources; the title's own
-        # resource descriptions and required mesh/indirect allocations remain intact.
-        # The log showed 2560x1440 host targets and a 3.6 GB GPU allocation
-        # on a 4 GB adapter. Half-size eligible targets use one quarter
-        # of the pixel area while the title still presents at 1280x720.
-        VICTORY_RENDER_SCALE = "0.5"
+        # Render-target scaling remains opt-in: mixed-scale copies can be
+        # skipped and may leave missing or stale output. Keep native dimensions.
+        VICTORY_RENDER_SCALE = "1.0"
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
         # Drop one additional top mip from eligible large sampled textures.
         VICTORY_TEXTURE_MIP_DROP = "3"
@@ -118,6 +119,8 @@ if ($UseLowVramProfile) {
         VICTORY_MESH_SHARED_SPARE_MB = "32"
         # Leave CPU headroom for the title instead of saturating all logical processors.
         VICTORY_DSTORAGE_WORKERS = "3"
+        # Two host lists per D3D12 submission balance queue overhead against TDR risk.
+        VICTORY_GPU_BATCH_LISTS = "2"
         # Serialize PSO creation during journal runs so a driver crash leaves one identifiable pending pipeline.
         # Explicit process overrides still take precedence in the loop below.
         VICTORY_PIPELINE_WORKERS = $(if ($PipelineJournalEnabled) { "1" } else { "2" })
@@ -130,13 +133,36 @@ if ($UseLowVramProfile) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    # The latest GTX 1050 Ti log hung while one synchronous submission contained
-    # 12 host lists (2.6 s). For diagnostics, submit and wait each host list
-    # separately, with command timestamps, so large batches cannot hide the
-    # slow list. This is diagnostics-only and adds synchronization overhead.
-    if ($ProfileName -eq "diag" -and
-        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_GPU_TIMING", "Process"))) {
-        $env:VICTORY_GPU_TIMING = "1"
+    # The diagnostic profile uses bounded batches by default. A deliberate
+    # override marker allows controlled tests to select a different batch size.
+    if ($ProfileName -eq "diag" -and $env:VICTORY_GPU_BATCH_LISTS_OVERRIDE -ne "1") {
+        $env:VICTORY_GPU_BATCH_LISTS = "2"
+    }
+
+    # The low-VRAM profile has bounded GPU-local shadows for only large
+    # title buffers. Honour them even if a previous launcher run left older
+    # values in this PowerShell process; opt out only with the explicit marker.
+    if ($UseLowVramProfile -and $env:VICTORY_CARD_BUFFERS_OVERRIDE -ne "1") {
+        $env:VICTORY_CARD_BUFFERS = "1"
+        $env:VICTORY_CARD_BUFFERS_MIN_MB = "64"
+        $env:VICTORY_CARD_BUFFERS_MB = "128"
+    }
+
+    # Render-target scaling can skip mixed-size copies. Keep it native unless
+    # the caller explicitly opts into the documented controlled experiment.
+    if ($UseLowVramProfile -and $env:VICTORY_RENDER_SCALE_OVERRIDE -ne "1") {
+        $env:VICTORY_RENDER_SCALE = "1.0"
+    }
+
+    # Per-list GPU timing fences every host list and severely reduced GPU
+    # throughput in the latest run. Keep it off by default; opt in explicitly
+    # for a focused TDR trace with VICTORY_GPU_TIMING_OVERRIDE=1.
+    if ($ProfileName -eq "diag") {
+        if ($env:VICTORY_GPU_TIMING_OVERRIDE -eq "1") {
+            $env:VICTORY_GPU_TIMING = "1"
+        } else {
+            Remove-Item Env:VICTORY_GPU_TIMING -ErrorAction SilentlyContinue
+        }
     }
 
     # Keep diagnostic runs synchronous unless the experimental overlap path is explicitly requested.
@@ -164,7 +190,7 @@ if ($UseLowVramProfile) {
     } else {
         Write-Host "Native FSPX compute handling: disabled; slot 0x218 keeps its previous E_NOTIMPL fallback behavior." -ForegroundColor Cyan
     }
-    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; indirect windowing=$env:VICTORY_INDIRECT_WINDOW; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; indirect windowing=$env:VICTORY_INDIRECT_WINDOW; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS (minimum=$env:VICTORY_CARD_BUFFERS_MIN_MB MiB, cap=$env:VICTORY_CARD_BUFFERS_MB MiB); host-list batch=$env:VICTORY_GPU_BATCH_LISTS." -ForegroundColor Cyan
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
         Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
     }
@@ -193,7 +219,11 @@ if ($ProfileName -eq "diag" -and
     $env:VICTORY_D3D12_DRED = "1"
 }
 if ($ProfileName -eq "diag") {
-    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$env:VICTORY_GPU_TIMING." -ForegroundColor Cyan
+    $GpuTimingStatus = "OFF (throughput mode)"
+    if ($env:VICTORY_GPU_TIMING -eq "1") {
+        $GpuTimingStatus = "ON (per-list fence waits; diagnostic only)"
+    }
+    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$GpuTimingStatus." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
