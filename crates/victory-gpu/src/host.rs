@@ -5162,17 +5162,14 @@ impl HostList {
                 stage = "resetting the prelude command list";
                 list.Reset(allocator, None)?;
                 if !to_copy.is_empty() {
-                    stage = "recording pre-copy resource barriers";
                     list.ResourceBarrier(&to_copy);
                 }
                 if !syncs.is_empty() {
-                    stage = "recording depth/color twin copies";
                     for (depth, twin, colour) in &syncs {
                         record_twin_copy(list, &depth.texture, twin, *colour);
                     }
                 }
                 if !barriers.is_empty() {
-                    stage = "recording final resource barriers";
                     list.ResourceBarrier(&barriers);
                 }
                 stage = "closing the prelude command list";
