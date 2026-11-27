@@ -82,6 +82,7 @@ jobs:
             'VICTORY_DSTORAGE_WORKERS = "3"',
             'VICTORY_PIPELINE_WORKERS = "2"',
             'VICTORY_EXPERIMENTAL_FSPX = "0"',
+            'VICTORY_PIPELINE_JOURNAL',
             '$env:VICTORY_EXPERIMENTAL_FSPX -eq "1"',
             '$UseGpuOverlap = ($env:VICTORY_GPU_OVERLAP -eq "1")',
             '$env:VICTORY_LATE_WAIT = "0"',

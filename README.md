@@ -78,8 +78,42 @@ The launcher records effective `VICTORY_*` settings, Windows/PowerShell versions
 | `VICTORY_KEYS=30:Enter,35:X` | press keys at those seconds (diagnostics build) |
 | `VICTORY_D3D12_DRED=1` | on a GPU failure, report the commands in flight |
 | `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
+| `VICTORY_PIPELINE_JOURNAL=1` | diagnose driver crashes during host pipeline creation; see below |
 
 Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`. When that executable is launched through `scripts\play.ps1`, DRED is enabled automatically unless an explicit `VICTORY_D3D12_DRED` process value is already present. Release builds are unchanged.
+
+
+
+### Diagnosing driver crashes during pipeline creation
+
+Some graphics drivers can crash inside their shader compiler while VIctory
+creates a host pipeline. The process can end before VIctory receives an error
+code, so the ordinary log may not identify the shader. Set
+`VICTORY_PIPELINE_JOURNAL=1` before launching to enable an opt-in journal
+beside the host pipeline cache:
+
+```powershell
+$env:VICTORY_PIPELINE_JOURNAL = "1"
+```
+
+Each in-flight host pipeline gets a small file in
+`pipeline-journal/pending`. On the next run, a single leftover note is
+recorded in `pipeline-journal/crashed.txt` and that pipeline is skipped;
+several notes become suspects and are retried one at a time. This can isolate
+a pipeline that crashes the driver and may let the title proceed, but draws
+or dispatches using a refused pipeline are dropped. It is a diagnostic
+workaround, not a shader translation fix.
+
+The legacy branch keeps a manual translator stamp in
+`crates/victory-gpu/src/pipeline/journal.rs`; bump it whenever changes to
+`victory-shader` can change emitted DXIL. A crash list from an older stamp
+then becomes suspects and is tested again. To retry one refused pipeline
+manually, remove its hash line from `pipeline-journal/crashed.txt` while
+keeping the translator header. Do not force-close VIctory while it is
+compiling pipelines: a process stopped mid-creation leaves a note too.
+
+The journal is off unless the variable is set. Enable it only while
+investigating a repeatable pipeline-creation crash.
 
 ## Mesh-shader fallback progress (2026-11-25)
 
