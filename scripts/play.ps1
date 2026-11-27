@@ -112,6 +112,8 @@ if ($UseLowVramProfile) {
         VICTORY_DSTORAGE_WORKERS = "3"
         VICTORY_PIPELINE_WORKERS = "2"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
+        # Native RDNA2 FSPX pipelines remain experimental until the corpus translates.
+        VICTORY_EXPERIMENTAL_FSPX = "0"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name, "Process"))) {
@@ -137,6 +139,11 @@ if ($UseLowVramProfile) {
         $env:VICTORY_LATE_WAIT = "0"
         $env:VICTORY_RELAY = "0"
         Remove-Item Env:VICTORY_LATE_WAIT_LISTS -ErrorAction SilentlyContinue
+    }
+    if ($env:VICTORY_EXPERIMENTAL_FSPX -eq "1") {
+        Write-Host "Experimental native FSPX compute handling: ENABLED (may replace the title's rendering fallback)." -ForegroundColor Yellow
+    } else {
+        Write-Host "Native FSPX compute handling: disabled; slot 0x218 keeps its previous E_NOTIMPL fallback behavior." -ForegroundColor Cyan
     }
     Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
