@@ -126,26 +126,33 @@ const SHADER_VISIBLE: u32 = 1;
 
 /// Shader-visible heaps by address range, for mirroring descriptor writes:
 /// start, end, heap.
+///
+/// Lookups are frequent and only heap creation/destruction mutates this list.
+/// A reader keeps the heap alive for the entire descriptor operation; returning
+/// a reference after releasing this lock would let Heap::drop race that use.
 #[cfg(windows)]
-static SHADER_HEAPS: std::sync::Mutex<Vec<(u64, u64, usize)>> = std::sync::Mutex::new(Vec::new());
+static SHADER_HEAPS: std::sync::RwLock<Vec<(u64, u64, usize)>> =
+    std::sync::RwLock::new(Vec::new());
 
-/// The shader-visible heap holding `handle`, and the descriptor's index.
+/// Serializes write-watch reconciliation if multiple queues submit concurrently.
 #[cfg(windows)]
-fn shader_slot<'a>(handle: u64) -> Option<(&'a Heap, u32)> {
-    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
-    let &(_, _, at) = heaps
-        .iter()
-        .find(|&&(start, end, _)| (start..end).contains(&handle))?;
-    // SAFETY: registered heaps are live (removed when dropped).
-    let heap = unsafe { &*(at as *const Heap) };
-    Some((heap, heap.index(handle)?))
-}
+static SYNCING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Makes the host descriptor for what the title wrote at `handle`, if it
-/// is in a shader-visible heap.
+/// is in a shader-visible heap. Keep the registry read-locked while using
+/// the raw Heap pointer so Heap::drop cannot free it concurrently.
 #[cfg(windows)]
 fn mirror(handle: u64) {
-    let Some((heap, index)) = shader_slot(handle) else {
+    let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+    let Some(&(_, _, at)) = heaps
+        .iter()
+        .find(|&&(start, end, _)| (start..end).contains(&handle))
+    else {
+        return;
+    };
+    // SAFETY: Heap::drop needs the write lock held by this read guard.
+    let heap = unsafe { &*(at as *const Heap) };
+    let Some(index) = heap.index(handle) else {
         return;
     };
     let mut pending = heap.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -160,6 +167,12 @@ fn mirror(handle: u64) {
     }
 }
 
+/// Per changed-page descriptor reconciliation: pages, records inspected,
+/// records remade. Diagnostic builds only.
+#[cfg(all(windows, feature = "diagnostics"))]
+static DESCRIPTOR_SYNC: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 /// Reconciles host-visible descriptors with whole slots the title wrote
 /// directly into its own shader-visible heap memory. Those writes bypass
 /// Create/CopyDescriptor calls, so API-call mirroring alone can leave a
@@ -173,10 +186,14 @@ fn mirror(handle: u64) {
 pub(crate) fn resync_title_writes() {
     use std::sync::atomic::Ordering::Relaxed;
 
-    // Held throughout: registered heaps stay alive while they are visited.
-    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    // One reconciliation at a time; the read guard keeps every registered
+    // Heap alive while its page records are read and mirrored.
+    let _syncing = SYNCING.lock().unwrap_or_else(|e| e.into_inner());
+    let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+    let page = crate::watch::PAGE as u64;
+    let mut page_bytes = Vec::new();
     for &(start, end, at) in heaps.iter() {
-        // SAFETY: registered heaps are live (removed when dropped).
+        // SAFETY: registered heaps are live (Heap::drop needs the write lock).
         let heap = unsafe { &*(at as *const Heap) };
         let (Some(Some(host)), Some(step)) =
             (heap.host.get(), increment(heap.desc.kind))
@@ -184,7 +201,6 @@ pub(crate) fn resync_title_writes() {
             continue;
         };
 
-        let page = crate::watch::PAGE as u64;
         let first = start / page * page;
         let last = end.div_ceil(page) * page;
         let Some((now, written)) =
@@ -192,27 +208,48 @@ pub(crate) fn resync_title_writes() {
         else {
             continue;
         };
-
         let before = heap.synced.swap(now, Relaxed);
         let step = u64::from(step);
+        // The capped host heap has no direct mirror slots beyond host.count().
+        let mirrored_count = heap.desc.count.min(host.count());
+
         for (page_number, asked) in written {
             if asked <= before {
                 continue;
             }
-            let from = (page_number as u64 * page).max(start);
-            let to = ((page_number as u64 + 1) * page).min(end);
+            let page_start = (page_number as u64).saturating_mul(page);
+            let from = page_start.max(start);
+            let to = page_start.saturating_add(page).min(end);
             if from >= to {
                 continue;
             }
 
-            let first_slot = (from - start) / step;
-            let last_slot = (to - start).div_ceil(step);
-            for slot in first_slot..last_slot {
-                let index = slot as u32;
-                if index < heap.desc.count {
-                    host.mirror(index, start + u64::from(index) * step, false);
-                }
+            // Read each changed page once through the guarded process-memory
+            // reader. A title may unmap a page while it is being reconciled;
+            // in that case skip it rather than dereferencing a stale pointer.
+            page_bytes.resize((to - from) as usize, 0);
+            if !crate::host::read_into(from as *const u8, &mut page_bytes) {
+                continue;
             }
+            let first_slot = (from - start) / step;
+            let last_slot = (to - start).div_ceil(step).min(u64::from(mirrored_count));
+            if first_slot >= last_slot {
+                continue;
+            }
+            let (looked, mirrored) = host.mirror_copied_page(
+                first_slot..last_slot,
+                (start, step),
+                from as usize,
+                &page_bytes,
+            );
+            #[cfg(feature = "diagnostics")]
+            {
+                DESCRIPTOR_SYNC[0].fetch_add(1, Relaxed);
+                DESCRIPTOR_SYNC[1].fetch_add(looked, Relaxed);
+                DESCRIPTOR_SYNC[2].fetch_add(mirrored, Relaxed);
+            }
+            #[cfg(not(feature = "diagnostics"))]
+            let _ = (looked, mirrored);
         }
     }
 }
@@ -221,7 +258,7 @@ pub(crate) fn resync_title_writes() {
 /// once no GPU submission is executing.
 #[cfg(windows)]
 pub(crate) fn flush_idle_heaps() {
-    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
     for &(_, _, at) in heaps.iter() {
         // SAFETY: registered heaps are live (removed when dropped).
         let heap = unsafe { &*(at as *const Heap) };
@@ -235,7 +272,7 @@ pub(crate) fn flush_idle_heaps() {
 /// `heap`, if that heap still exists.
 #[cfg(windows)]
 pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
-    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
     if heaps.iter().any(|&(_, _, h)| h == heap)
         // SAFETY: registered heaps are live (removed when dropped).
         && let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get()
@@ -248,7 +285,7 @@ pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
 impl Drop for Heap {
     fn drop(&mut self) {
         let at = std::ptr::from_ref::<Heap>(self) as usize;
-        let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
         heaps.retain(|&(_, _, h)| h != at);
     }
 }
@@ -741,7 +778,16 @@ pub(crate) fn make_waiting() {
             // texture without a host copy must go on waiting).
             // (Looked up first: the handle is read only while its heap is
             // there.)
-            let Some((heap, index)) = shader_slot(handle) else {
+            let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+            let Some(&(_, _, at)) = heaps
+                .iter()
+                .find(|&&(start, end, _)| (start..end).contains(&handle))
+            else {
+                continue;
+            };
+            // SAFETY: the read guard keeps this registered Heap alive.
+            let heap = unsafe { &*(at as *const Heap) };
+            let Some(index) = heap.index(handle) else {
                 continue;
             };
             let same = match view(handle) {
@@ -1028,7 +1074,7 @@ pub(crate) extern "system" fn create_heap(
     #[cfg(windows)]
     if visible {
         let at = std::ptr::from_ref::<Heap>(&heap) as usize;
-        let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut heaps = SHADER_HEAPS.write().unwrap_or_else(|e| e.into_inner());
         heaps.push((start, start + size, at));
     }
     #[cfg(not(windows))]
