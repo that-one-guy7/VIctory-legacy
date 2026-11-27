@@ -1,10 +1,11 @@
-//! Host memory-pressure handling for texture staging and idle host-side copies.
+//! Host and GPU memory-pressure handling for texture staging and idle host-side copies.
 //!
 //! This is not a global GPU-memory quota. It leaves required render targets,
 //! mesh scratch, and indirect buffers on their existing allocation paths.
-//! It only pauses new texture staging after an actual D3D12 OOM or when OS
-//! memory is critically low, while shortening the lifetime of unreferenced
-//! idle copies during sustained host-memory pressure.
+//! It pauses new texture staging after an actual D3D12 OOM, when OS memory is
+//! critically low, or when DXGI reports that local/shared GPU memory is near
+//! its budget. Under pressure it shortens the lifetime of unreferenced idle
+//! copies; resources still held by a list or descriptor are never evicted.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -13,10 +14,15 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 const OOM_RETRY_MS: u64 = 500;
+const GPU_BUDGET_PRESSURE_PERCENT: u64 = 90;
+const GPU_BUDGET_RECOVERY_PERCENT: u64 = 80;
+const GPU_PRESSURE_IDLE_MS: u64 = 1_000;
+const GPU_PRESSURE_IDLE_FRAMES: u64 = 1;
 const CRITICAL_PHYSICAL_FREE: u64 = 512 * MIB;
 const CRITICAL_COMMIT_FREE: u64 = 512 * MIB;
 
 static PRESSURED: AtomicBool = AtomicBool::new(false);
+static GPU_PRESSURED: AtomicBool = AtomicBool::new(false);
 static NEXT_SAMPLE_AT: AtomicU64 = AtomicU64::new(0);
 static PHYSICAL_FREE: AtomicU64 = AtomicU64::new(u64::MAX);
 static COMMIT_FREE: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -67,28 +73,71 @@ fn critical_memory(physical: u64, commit: u64) -> bool {
     physical < CRITICAL_PHYSICAL_FREE || commit < CRITICAL_COMMIT_FREE
 }
 
+/// Whether a DXGI memory segment has reached the configured budget threshold.
+/// A missing/zero budget is treated as unknown rather than as pressure.
+fn gpu_budget_pressure(budget: u64, used: u64, percent: u64) -> bool {
+    if budget == 0 {
+        return false;
+    }
+    let percent = percent.min(100);
+    let limit = (budget / 100) * percent + (budget % 100) * percent / 100;
+    used >= limit
+}
+
 /// Called by the once-per-second host maintenance sweep.
 pub(crate) fn refresh() {
     let now = crate::host::now_ms();
-    let Some((physical, commit)) = sample_memory(now) else {
-        return;
-    };
-    let was = PRESSURED.load(Ordering::Relaxed);
-    let pressure = next_pressure(was, physical, commit);
-    if pressure != was {
-        PRESSURED.store(pressure, Ordering::Relaxed);
-        if pressure {
-            tracing::warn!(
-                physical_free_mib = physical / MIB,
-                available_commit_mib = commit / MIB,
-                "host memory pressure: shortening idle-copy retention; required rendering allocations remain enabled"
-            );
+    if let Some((physical, commit)) = sample_memory(now) {
+        let was = PRESSURED.load(Ordering::Relaxed);
+        let pressure = next_pressure(was, physical, commit);
+        if pressure != was {
+            PRESSURED.store(pressure, Ordering::Relaxed);
+            if pressure {
+                tracing::warn!(
+                    physical_free_mib = physical / MIB,
+                    available_commit_mib = commit / MIB,
+                    "host memory pressure: shortening idle-copy retention; required rendering allocations remain enabled"
+                );
+            } else {
+                tracing::info!(
+                    physical_free_mib = physical / MIB,
+                    available_commit_mib = commit / MIB,
+                    "host memory pressure cleared"
+                );
+            }
+        }
+    }
+
+    // DXGI's per-segment budgets can be exhausted while Windows still has
+    // several GiB of physical RAM and commit headroom. Sample both local VRAM
+    // and the non-local segment so upload allocations are deferred before the
+    // driver starts failing them.
+    if let Some([local_budget, local_used, shared_budget, shared_used]) =
+        crate::host::host().and_then(|host| host.video_memory())
+    {
+        // Use hysteresis so small DXGI budget fluctuations do not make
+        // staging repeatedly stop and restart around one threshold.
+        let threshold = if GPU_PRESSURED.load(Ordering::Relaxed) {
+            GPU_BUDGET_RECOVERY_PERCENT
         } else {
-            tracing::info!(
-                physical_free_mib = physical / MIB,
-                available_commit_mib = commit / MIB,
-                "host memory pressure cleared"
-            );
+            GPU_BUDGET_PRESSURE_PERCENT
+        };
+        let gpu_pressure = gpu_budget_pressure(local_budget, local_used, threshold)
+            || gpu_budget_pressure(shared_budget, shared_used, threshold);
+        let was_gpu_pressure = GPU_PRESSURED.swap(gpu_pressure, Ordering::Relaxed);
+        if gpu_pressure != was_gpu_pressure {
+            if gpu_pressure {
+                tracing::warn!(
+                    local_budget_mib = local_budget / MIB,
+                    local_used_mib = local_used / MIB,
+                    shared_budget_mib = shared_budget / MIB,
+                    shared_used_mib = shared_used / MIB,
+                    threshold_percent = GPU_BUDGET_PRESSURE_PERCENT,
+                    "GPU memory budget pressure: deferring new texture staging and shortening idle-copy retention"
+                );
+            } else {
+                tracing::info!("GPU memory budget pressure cleared");
+            }
         }
     }
 }
@@ -130,9 +179,20 @@ fn warn_deferred(now: u64, bytes: u64, reason: &'static str, physical: u64, comm
 }
 
 /// Whether a newly sampled texture may allocate its host upload staging buffer.
-/// Existing textures and in-flight lists are untouched and can still render.
+/// Existing staging and in-flight lists are untouched; a new texture may be
+/// deferred and retried on a later use.
 pub(crate) fn allow_texture_staging(bytes: u64) -> bool {
     let now = crate::host::now_ms();
+    if GPU_PRESSURED.load(Ordering::Relaxed) {
+        warn_deferred(
+            now,
+            bytes,
+            "DXGI local/shared GPU memory budget pressure",
+            PHYSICAL_FREE.load(Ordering::Relaxed),
+            COMMIT_FREE.load(Ordering::Relaxed),
+        );
+        return false;
+    }
     let retry_at = RETRY_TEXTURES_AT.load(Ordering::Relaxed);
     if now < retry_at {
         warn_deferred(
@@ -174,17 +234,54 @@ fn pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
     }
 }
 
+fn gpu_pressure_idle_timeout_ms(pressured: bool, normal: u64) -> u64 {
+    if pressured {
+        normal.min(GPU_PRESSURE_IDLE_MS)
+    } else {
+        normal
+    }
+}
+
+fn gpu_pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
+    if pressured {
+        normal.min(GPU_PRESSURE_IDLE_FRAMES)
+    } else {
+        normal
+    }
+}
+
 pub(crate) fn idle_timeout_ms(normal: u64) -> u64 {
-    pressure_idle_timeout_ms(PRESSURED.load(Ordering::Relaxed), normal)
+    let gpu = GPU_PRESSURED.load(Ordering::Relaxed);
+    if gpu {
+        gpu_pressure_idle_timeout_ms(gpu, normal)
+    } else {
+        pressure_idle_timeout_ms(PRESSURED.load(Ordering::Relaxed), normal)
+    }
 }
 
 pub(crate) fn idle_timeout_frames(normal: u64) -> u64 {
-    pressure_idle_timeout_frames(PRESSURED.load(Ordering::Relaxed), normal)
+    let gpu = GPU_PRESSURED.load(Ordering::Relaxed);
+    if gpu {
+        gpu_pressure_idle_timeout_frames(gpu, normal)
+    } else {
+        pressure_idle_timeout_frames(PRESSURED.load(Ordering::Relaxed), normal)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_budget_pressure_uses_threshold_and_ignores_unknown_budgets() {
+        assert!(!gpu_budget_pressure(4_000, 3_599, 90));
+        assert!(gpu_budget_pressure(4_000, 3_600, GPU_BUDGET_PRESSURE_PERCENT));
+        assert!(gpu_budget_pressure(4_000, 4_100, GPU_BUDGET_PRESSURE_PERCENT));
+        assert!(!gpu_budget_pressure(4_000, 3_199, GPU_BUDGET_RECOVERY_PERCENT));
+        assert!(gpu_budget_pressure(4_000, 3_200, GPU_BUDGET_RECOVERY_PERCENT));
+        assert!(!gpu_budget_pressure(0, u64::MAX, 90));
+        assert!(gpu_budget_pressure(u64::MAX, u64::MAX, 100));
+    }
 
     #[test]
     fn pressure_enters_and_recovers_with_hysteresis() {
@@ -213,5 +310,9 @@ mod tests {
         assert_eq!(2_500, pressure_idle_timeout_ms(true, 10_000));
         assert_eq!(2, pressure_idle_timeout_frames(true, 4));
         assert_eq!(4, pressure_idle_timeout_frames(false, 4));
+        assert_eq!(1_000, gpu_pressure_idle_timeout_ms(true, 10_000));
+        assert_eq!(10_000, gpu_pressure_idle_timeout_ms(false, 10_000));
+        assert_eq!(1, gpu_pressure_idle_timeout_frames(true, 4));
+        assert_eq!(4, gpu_pressure_idle_timeout_frames(false, 4));
     }
 }
