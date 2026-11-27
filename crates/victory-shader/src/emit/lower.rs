@@ -845,6 +845,446 @@ fn meeting_mode() -> u32 {
     if super::group_sync() == 0 { 8 } else { 1 | 8 }
 }
 
+/// One LDS access as considered by the exact lane-branch ordering check.
+#[derive(Clone, PartialEq, Debug)]
+enum LdsUse {
+    Read,
+    Write,
+    /// An atomic whose final memory value is independent of the order of lanes.
+    Atomic(String),
+}
+
+fn lds_use(name: &str) -> LdsUse {
+    if name.starts_with("ds_read") {
+        return LdsUse::Read;
+    }
+    let rest = name.strip_prefix("ds_").unwrap_or(name);
+    let op = rest.split('_').next().unwrap_or("");
+    if matches!(op, "add" | "sub" | "min" | "max" | "and" | "or" | "xor")
+        && !rest.contains("src2")
+    {
+        return LdsUse::Atomic(rest.replace("_rtn", ""));
+    }
+    LdsUse::Write
+}
+
+/// Definitions of SSA values, for resolving constant LDS addresses.
+fn lds_value_defs(p: &Program) -> HashMap<Value, &Inst> {
+    let mut defs = HashMap::new();
+    for block in &p.blocks {
+        for inst in &block.insts {
+            for &(_, value) in &inst.writes {
+                defs.insert(value, inst);
+            }
+        }
+    }
+    defs
+}
+
+/// A value written by a plain vector/scalar move of an inline or literal constant.
+fn lds_constant(defs: &HashMap<Value, &Inst>, value: Value) -> Option<u32> {
+    let inst = defs.get(&value)?;
+    if !matches!(inst.name(), "v_mov_b32" | "s_mov_b32") {
+        return None;
+    }
+    let src = match &inst.fields {
+        Fields::Valu(v) if v.dpp.is_none() && v.sdwa.is_none() => *v.src.first()?,
+        Fields::Sop { src, .. } => *src.first()?,
+        _ => return None,
+    };
+    match src {
+        Operand::Const(c) => crate::resource::inline(c),
+        Operand::Literal(x) => Some(x),
+        _ => None,
+    }
+}
+
+/// Dword addresses touched by an LDS instruction, if its base is statically known.
+fn lds_dwords(defs: &HashMap<Value, &Inst>, inst: &Inst) -> Option<Vec<u32>> {
+    let Fields::Ds {
+        addr,
+        offset0,
+        offset1,
+        gds: false,
+        ..
+    } = &inst.fields
+    else {
+        return None;
+    };
+    let base = match addr {
+        Some(Operand::Vector { reg, .. }) => lds_constant(defs, inst.read(Reg::V(*reg))?)?,
+        _ => return None,
+    };
+    let width = match inst.name().rsplit('_').next() {
+        Some("b64" | "u64" | "i64" | "f64") => 2,
+        Some("b96") => 3,
+        Some("b128") => 4,
+        _ => 1,
+    };
+    let addresses = if inst.name().contains("read2")
+        || inst.name().contains("write2")
+        || inst.name().contains("wrxchg2")
+    {
+        let scale = 4 * width * if inst.name().contains("st64") { 64 } else { 1 };
+        vec![
+            base + u32::from(*offset0) * scale,
+            base + u32::from(*offset1) * scale,
+        ]
+    } else {
+        vec![base + (u32::from(*offset0) | (u32::from(*offset1) << 8))]
+    };
+    Some(
+        addresses
+            .into_iter()
+            .flat_map(|address| (address / 4)..(address + 4 * width).div_ceil(4))
+            .collect(),
+    )
+}
+
+/// Whether two LDS uses in one region may touch the same dword and need ordering.
+fn lds_conflict(uses: &[(LdsUse, Option<Vec<u32>>)]) -> bool {
+    for (i, (left, left_dwords)) in uses.iter().enumerate() {
+        for (right, right_dwords) in &uses[i + 1..] {
+            let ordered = match (left, right) {
+                (LdsUse::Read, LdsUse::Read) => false,
+                (LdsUse::Atomic(a), LdsUse::Atomic(b)) => a != b,
+                _ => true,
+            };
+            if !ordered {
+                continue;
+            }
+            match (left_dwords, right_dwords) {
+                (Some(a), Some(b)) if !a.iter().any(|dword| b.contains(dword)) => {}
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod lds_exact_tests {
+    use super::{LdsUse, lds_conflict, lds_use};
+
+    #[test]
+    fn access_kinds_are_classified_conservatively() {
+        assert_eq!(lds_use("ds_read_b32"), LdsUse::Read);
+        assert_eq!(lds_use("ds_read2_b32"), LdsUse::Read);
+        assert_eq!(lds_use("ds_write_b32"), LdsUse::Write);
+        assert_eq!(lds_use("ds_add_u32"), lds_use("ds_add_rtn_u32"));
+        assert_eq!(lds_use("ds_add_u32"), LdsUse::Atomic("add_u32".into()));
+        assert_ne!(lds_use("ds_add_u32"), lds_use("ds_max_u32"));
+        assert_eq!(lds_use("ds_wrxchg_rtn_b32"), LdsUse::Write);
+        assert_eq!(lds_use("ds_cmpst_b32"), LdsUse::Write);
+        assert_eq!(lds_use("ds_inc_u32"), LdsUse::Write);
+    }
+
+    #[test]
+    fn only_nonconflicting_dwords_can_be_reordered() {
+        let at = |dwords: &[u32]| Some(dwords.to_vec());
+        let add = || LdsUse::Atomic("add_u32".into());
+        assert!(!lds_conflict(&[
+            (LdsUse::Read, at(&[0])),
+            (add(), at(&[4])),
+            (add(), at(&[5])),
+        ]));
+        assert!(lds_conflict(&[(LdsUse::Read, at(&[4])), (add(), at(&[4]))]));
+        assert!(lds_conflict(&[
+            (LdsUse::Read, at(&[2, 3])),
+            (LdsUse::Write, at(&[3])),
+        ]));
+        assert!(lds_conflict(&[(LdsUse::Read, None), (LdsUse::Write, at(&[9]))]));
+        assert!(lds_conflict(&[(LdsUse::Read, at(&[0])), (add(), None)]));
+        assert!(!lds_conflict(&[(add(), at(&[1])), (add(), at(&[1]))]));
+        assert!(lds_conflict(&[
+            (add(), at(&[1])),
+            (LdsUse::Atomic("max_u32".into()), at(&[1])),
+        ]));
+        assert!(!lds_conflict(&[
+            (LdsUse::Read, None),
+            (LdsUse::Read, None),
+        ]));
+    }
+}
+
+/// Whether a lane-branch region that reads and writes LDS only raises one constant flag.
+/// This is safe to split across host waves: a read that misses the other half's write
+/// only lets that lane continue as though the flag were still down.
+fn lds_flag_region(p: &Program, st: &Structured, blocks: &[usize]) -> bool {
+    let inside: HashSet<usize> = blocks.iter().copied().collect();
+    let mut defs: HashMap<Value, (usize, usize)> = HashMap::new();
+    for (block_index, block) in p.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
+            for &(_, value) in &inst.writes {
+                defs.insert(value, (block_index, inst_index));
+            }
+        }
+    }
+    let inline = |operand: &Operand| -> Option<u32> {
+        match *operand {
+            Operand::Const(c @ 128..=192) => Some(u32::from(c) - 128),
+            Operand::Const(c @ 193..=208) => Some((-(i32::from(c) - 192)) as u32),
+            Operand::Literal(value) => Some(value),
+            _ => None,
+        }
+    };
+    let constant = |value: Option<Value>, at: (usize, usize)| -> Option<u32> {
+        let (block_index, inst_index) = *defs.get(&value?)?;
+        let inst = &p.blocks[block_index].insts[inst_index];
+        if inst.name() != "v_mov_b32" {
+            return None;
+        }
+        let guard = st.guards.get(block_index)?.get(inst_index).copied().flatten();
+        let same = guard.is_none()
+            || (block_index == at.0 && guard == st.guards.get(at.0)?.get(at.1).copied().flatten());
+        let Fields::Valu(valu) = &inst.fields else { return None };
+        if !same || valu.dpp.is_some() || valu.sdwa.is_some() {
+            return None;
+        }
+        inline(valu.src.first()?)
+    };
+
+    let mut accesses: Vec<(usize, usize, bool, u32)> = Vec::new();
+    let mut stored: Option<u32> = None;
+    for &block_index in blocks {
+        for (inst_index, inst) in p.blocks[block_index].insts.iter().enumerate() {
+            let name = inst.name();
+            if name.contains("store")
+                || name.contains("atomic")
+                || name.starts_with("exp")
+                || name.starts_with("s_sendmsg")
+                || name == "s_barrier"
+            {
+                return false;
+            }
+            let Fields::Ds {
+                addr,
+                data,
+                offset0,
+                offset1,
+                gds,
+                ..
+            } = &inst.fields
+            else {
+                if name.starts_with("ds_") {
+                    return false;
+                }
+                continue;
+            };
+            if name.starts_with("ds_swizzle") || name.contains("permute") {
+                continue;
+            }
+            let is_read = match name {
+                "ds_read_b32" => true,
+                "ds_write_b32" => false,
+                _ => return false,
+            };
+            if *gds {
+                return false;
+            }
+            let Some(Operand::Vector { reg, .. }) = *addr else { return false };
+            let Some(base) = constant(inst.read(Reg::V(reg)), (block_index, inst_index)) else {
+                return false;
+            };
+            let address = base.wrapping_add(u32::from(*offset0) | (u32::from(*offset1) << 8));
+            if !is_read {
+                let Some(&Operand::Vector { reg, .. }) = data.first() else { return false };
+                let Some(value) = constant(inst.read(Reg::V(reg)), (block_index, inst_index)) else {
+                    return false;
+                };
+                if stored.is_some_and(|old| old != value) {
+                    return false;
+                }
+                stored = Some(value);
+            }
+            accesses.push((block_index, inst_index, is_read, address));
+        }
+    }
+
+    let read_at: HashSet<u32> = accesses.iter().filter(|access| access.2).map(|a| a.3).collect();
+    let written_at: HashSet<u32> = accesses.iter().filter(|access| !access.2).map(|a| a.3).collect();
+    let flags: Vec<u32> = read_at.intersection(&written_at).copied().collect();
+    if flags.len() > 1 {
+        return false;
+    }
+    if let Some(&flag) = flags.first() {
+        let successors = |block_index: usize| -> Vec<usize> {
+            match st.exits[block_index] {
+                LaneExit::Jump(target) => vec![target],
+                LaneExit::Branch { taken, not_taken, .. } => vec![taken, not_taken],
+                LaneExit::End | LaneExit::Indirect => Vec::new(),
+            }
+        };
+        for &(read_block, read_index, is_read, _) in &accesses {
+            if !is_read {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            let mut work: Vec<usize> = successors(read_block)
+                .into_iter()
+                .filter(|target| inside.contains(target))
+                .collect();
+            while let Some(block_index) = work.pop() {
+                if seen.insert(block_index) {
+                    work.extend(
+                        successors(block_index)
+                            .into_iter()
+                            .filter(|target| inside.contains(target)),
+                    );
+                }
+            }
+            let writes_other_after_read = accesses.iter().any(|&(write_block, write_index, is_read, address)| {
+                !is_read
+                    && address != flag
+                    && ((write_block == read_block && write_index > read_index)
+                        || seen.contains(&write_block))
+            });
+            if writes_other_after_read {
+                return false;
+            }
+        }
+    }
+
+    let successors = |block_index: usize| -> Option<Vec<usize>> {
+        match st.exits[block_index] {
+            LaneExit::Jump(target) => Some(vec![target]),
+            LaneExit::Branch { taken, not_taken, .. } => Some(vec![taken, not_taken]),
+            LaneExit::End => Some(Vec::new()),
+            LaneExit::Indirect => None,
+        }
+    };
+    let n = st.exits.len().min(p.blocks.len());
+    if (0..n).any(|block_index| successors(block_index).is_none()) {
+        return false;
+    }
+    let is_exec = |reg: Reg| matches!(reg, Reg::S(s) if s == EXEC || s == EXEC + 1);
+    let covers = |operands: &[Operand], reg: Reg| {
+        let Reg::V(register) = reg else { return false };
+        operands.iter().any(|operand| {
+            matches!(*operand, Operand::Vector { reg, dwords }
+                if (u16::from(reg)..u16::from(reg) + u16::from(dwords.max(1)))
+                    .contains(&u16::from(register)))
+        })
+    };
+    let effect = |block_index: usize, inst_index: usize| -> (Vec<Reg>, Vec<Reg>) {
+        let inst = &p.blocks[block_index].insts[inst_index];
+        let name = inst.name();
+        let partial = name.contains("16")
+            || name.contains("mac")
+            || name.contains("lane")
+            || matches!(&inst.fields, Fields::Valu(v) if v.dpp.is_some() || v.sdwa.is_some());
+        let sources: Option<Vec<Operand>> = match &inst.fields {
+            Fields::Valu(v) if !partial => Some(v.src.clone()),
+            Fields::Ds { addr, data, .. } if !partial => {
+                Some(addr.iter().copied().chain(data.iter().copied()).collect())
+            }
+            Fields::Buffer { addr, .. }
+                if !partial && !name.contains("store") && !name.contains("atomic") =>
+            {
+                Some(vec![*addr])
+            }
+            Fields::Image { addr, .. }
+                if !partial && !name.contains("store") && !name.contains("atomic") =>
+            {
+                Some(addr.clone())
+            }
+            _ => None,
+        };
+        let mut reads = Vec::new();
+        for &(reg, _) in &inst.reads {
+            if is_exec(reg) {
+                continue;
+            }
+            let old_only = matches!(reg, Reg::V(_))
+                && inst.write(reg).is_some()
+                && sources.as_ref().is_some_and(|operands| !covers(operands, reg));
+            if !old_only {
+                reads.push(reg);
+            }
+        }
+        let whole = st
+            .guards
+            .get(block_index)
+            .and_then(|guards| guards.get(inst_index))
+            .copied()
+            .flatten()
+            .is_none();
+        let kills: Vec<Reg> = if whole
+            && (sources.is_some()
+                || !matches!(
+                    inst.fields,
+                    Fields::Valu(_) | Fields::Ds { .. } | Fields::Buffer { .. } | Fields::Image { .. }
+                ))
+        {
+            inst.writes
+                .iter()
+                .map(|write| write.0)
+                .filter(|&reg| !is_exec(reg) && !(partial && matches!(reg, Reg::V(_))))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (reads, kills)
+    };
+
+    let mut live_in: Vec<HashSet<Reg>> = vec![HashSet::new(); n];
+    loop {
+        let mut changed = false;
+        for block_index in (0..n).rev() {
+            let mut live = HashSet::new();
+            for target in successors(block_index).unwrap_or_default() {
+                if let Some(incoming) = live_in.get(target) {
+                    live.extend(incoming.iter().copied());
+                }
+            }
+            for inst_index in (0..p.blocks[block_index].insts.len()).rev() {
+                let (reads, kills) = effect(block_index, inst_index);
+                for reg in kills {
+                    live.remove(&reg);
+                }
+                live.extend(reads);
+            }
+            if live != live_in[block_index] {
+                live_in[block_index] = live;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let written: HashSet<Reg> = blocks
+        .iter()
+        .flat_map(|&block_index| {
+            p.blocks[block_index]
+                .insts
+                .iter()
+                .flat_map(|inst| inst.writes.iter().map(|write| write.0))
+        })
+        .filter(|&reg| !is_exec(reg))
+        .collect();
+    let mut leaks = Vec::new();
+    for &block_index in blocks {
+        for target in successors(block_index).unwrap_or_default() {
+            if inside.contains(&target) {
+                continue;
+            }
+            for reg in &live_in[target] {
+                if written.contains(reg) {
+                    leaks.push((target, *reg));
+                }
+            }
+        }
+    }
+    if std::env::var_os("VICTORY_WAVE_DUMP").is_some() {
+        eprintln!(
+            "WAVE64-LDS-FLAGS blocks={blocks:?} flag={flags:?} stored={stored:?} leaks={leaks:?}"
+        );
+    }
+    leaks.is_empty()
+}
+
 /// LDS accesses of a console wave run as two host waves, where some sit in blocks that only
 /// some lanes run (`all` is [`all_lane_blocks`]): per IR block, whether the host waves meet (a
 /// group barrier) at its start and before its exit. `None` if barriers cannot keep the
@@ -885,17 +1325,22 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
             }
         }
     }
-    // per region: LDS reads, LDS writes
+    // Per region: reads, writes, and exact accesses with their touched dwords.
     let mut reads = vec![false; n];
     let mut writes = vec![false; n];
+    let mut uses: Vec<Vec<(LdsUse, Option<Vec<u32>>)>> = vec![Vec::new(); n];
+    let defs = lds_value_defs(p);
     for (b, block) in p.blocks.iter().enumerate().take(n) {
         if all[b] {
             continue;
         }
         let r = find(&mut region, b);
-        for i in &block.insts {
-            let name = i.name();
-            if !matches!(i.fields, Fields::Ds { .. }) || name.starts_with("ds_swizzle") || name.contains("permute") {
+        for inst in &block.insts {
+            let name = inst.name();
+            if !matches!(inst.fields, Fields::Ds { .. })
+                || name.starts_with("ds_swizzle")
+                || name.contains("permute")
+            {
                 continue;
             }
             if name.starts_with("ds_read") {
@@ -903,10 +1348,26 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
             } else {
                 writes[r] = true;
             }
+            uses[r].push((lds_use(name), lds_dwords(&defs, inst)));
         }
     }
-    if (0..n).any(|r| reads[r] && writes[r]) {
-        return None;
+    let exact = std::env::var_os("VICTORY_LDS_EXACT").is_some_and(|value| value == "1");
+    let flags_on = std::env::var_os("VICTORY_LDS_FLAGS").is_some_and(|value| value == "1")
+        || {
+            #[cfg(test)]
+            { TEST_LDS_FLAGS.get() }
+            #[cfg(not(test))]
+            { false }
+        };
+    for r in (0..n).filter(|&r| reads[r] && writes[r]) {
+        let blocks: Vec<usize> = (0..n)
+            .filter(|&b| !all[b] && find(&mut region, b) == r)
+            .collect();
+        let exact_safe = exact && !lds_conflict(&uses[r]);
+        let flags_safe = flags_on && lds_flag_region(p, st, &blocks);
+        if !exact_safe && !flags_safe {
+            return None;
+        }
     }
     let mut meet = vec![(false, false); n];
     for b in 0..n {
@@ -1051,6 +1512,11 @@ pub(super) fn host_max_wave() -> u32 {
 thread_local! {
     /// A test's host wave size, for its thread only ([`set_host_max_wave`] is the process's).
     pub(super) static TEST_HOST_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Enables the exact LDS-flag analysis for synthetic wave64 tests only.
+    pub(super) static TEST_LDS_FLAGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(super) fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
