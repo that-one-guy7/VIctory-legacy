@@ -104,6 +104,14 @@ a pipeline that crashes the driver and may let the title proceed, but draws
 or dispatches using a refused pipeline are dropped. It is a diagnostic
 workaround, not a shader translation fix.
 
+When the journal is enabled and the low-VRAM/diagnostic launcher profile is
+active, the launcher defaults `VICTORY_PIPELINE_WORKERS` to `1` unless an
+explicit process override is already set. This serializes host PSO creation
+during the diagnostic run so a driver crash normally leaves one identifiable
+pending pipeline rather than several concurrent candidates. Cold pipeline
+creation can take longer; with the journal off, the profile keeps its existing
+two-worker default.
+
 The legacy branch keeps a manual translator stamp in
 `crates/victory-gpu/src/pipeline/journal.rs`; bump it whenever changes to
 `victory-shader` can change emitted DXIL. A crash list from an older stamp
