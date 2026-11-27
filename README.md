@@ -50,10 +50,17 @@ powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<your game fold
 (a DualShock/DualSense through DS4Windows works). With no pad connected the
 keyboard acts as one while the game window has focus.
 
-## Faster settings (optional, off by default)
+## Faster settings (experimental, off by default)
 
-`VICTORY_RELAY=2`, or `VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1` cut frame
-time on the test machines. Set them in PowerShell before running the script.
+The diagnostic low-VRAM profile keeps asynchronous GPU submission and the
+copy-back relay disabled while black-scene rendering is being isolated. To
+reproduce the experimental PR #34 overlap path, set
+`$env:VICTORY_GPU_OVERLAP="1"` in PowerShell before launching
+`scripts\\play.ps1`. It defaults to `VICTORY_LATE_WAIT=3`,
+`VICTORY_LATE_WAIT_LISTS=64`, and `VICTORY_RELAY=2`; explicitly supplied
+values for those three settings are honored only after opting in. The
+stage-3 path omits the diagnostics-only per-present black-frame readback.
+`VICTORY_WIDE_BACK=1` remains a separate experimental option.
 
 ## Experimental render-resolution scaling
 
@@ -162,28 +169,27 @@ being called repeatedly. The implementation is covered by parser and device
 method unit tests, but the real game's complete FSPX corpus still needs
 hardware validation.
 
-The diagnostic low-VRAM launch profile also sets
-`VICTORY_LATE_WAIT=3` and `VICTORY_RELAY=2`. Stage 3 lets CPU recording
-overlap GPU execution and moves presentation behind queued work; the relay
-lands completed submissions and compares/merges shader-written title buffers
-on a separate worker instead of blocking the submission thread. This targets
-the large per-frame title-buffer copy-back cost in the diagnostic log. It may
-improve throughput where the GPU was idle while the wrapper prepared work.
-Stage 3 skips the diagnostics-only per-present black-frame readback; explicit
-saved/captured frames still synchronize. Both settings can keep more work in
-flight, so compare local VRAM and TDR behavior after the change. Set
-`VICTORY_LATE_WAIT=0` and `VICTORY_RELAY=0` to disable them for an A/B run.
-Explicit process variables always take precedence: an inherited
-`VICTORY_MESH_SHARED_SPARE_MB=128`, for example, overrides the 32 MiB
-low-VRAM preset. The launcher now prints a warning for that mismatch.
+As of the 2026-11-27 GTX 1050 Ti run, asynchronous overlap is
+**not enabled by default** in the diagnostic low-VRAM profile. That run had
+`VICTORY_LATE_WAIT=2` and `VICTORY_RELAY=2`, recorded 888 shader translation
+failures (886 compute and 2 pixel), and ended in
+`DXGI_ERROR_DEVICE_HUNG` after 12 submissions / 78 host lists were in flight.
+Those facts show that the overlap experiment and shader-coverage failures
+were both present; they do not prove that overlap alone caused the black 3D
+output. The launcher now forces `VICTORY_LATE_WAIT=0` and
+`VICTORY_RELAY=0` for diagnostic low-VRAM runs unless
+`VICTORY_GPU_OVERLAP=1` is explicitly set. This gives the next test the
+synchronous submission path and restores the per-present black-frame
+readback, while keeping the FSPX parser and compute-pipeline support intact.
 
-The latest uploaded GTX 1050 Ti run ended with `DXGI_ERROR_DEVICE_HUNG`
-(`0x887A0006`) and a TDR, not an allocation failure. It also recorded
-hundreds-of-milliseconds queue/frame samples and about 1 GiB of shader-written
-title-buffer ranges to compare each frame. The log does not identify one
-specific invalid GPU command, so this change targets the confirmed missing
-compute path and the measured CPU/GPU submission gap without claiming the TDR
-is already fixed or promising a particular frame rate.
+The async path remains available for controlled A/B testing. It can keep more
+work in flight, increases the importance of correct shader-write copy-back,
+and stage 3 omits the diagnostics-only per-present black-frame readback.
+This rollback is an isolation step, **not proof that shader translation or
+the black 3D scene is fixed**. The unsupported compute descriptor/address
+patterns and the two barycentric-dependent pixel shaders remain separate
+renderer-coverage issues to investigate if the synchronous test is still
+black.
 
 ### Follow-up GTX 1050 Ti crash run before PR #32 (2026-11-26, 21:54 local / -06:00)
 
