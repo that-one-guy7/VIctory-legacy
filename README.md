@@ -64,7 +64,7 @@ stage-3 path omits the diagnostics-only per-present black-frame readback.
 
 ## Experimental render-resolution scaling
 
-`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The default is `1.0` (off). The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure. Keep it disabled unless you are testing this behavior.
+`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general default is `1.0` (off); the `diag` low-VRAM launcher preset defaults to `0.5` on 4 GB-class testing systems, unless an explicit process value is already set. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure. Set `VICTORY_RENDER_SCALE=1.0` to disable the diagnostic preset's scaling.
 
 ## Diagnostic log
 
