@@ -891,8 +891,9 @@ mod tests {
         packet[0x18..0x1c].copy_from_slice(&0x9cu32.to_le_bytes());
 
         let mut meta = vec![0u8; FSPX_RECORDS + FSPX_RECORD];
+        let meta_len = (meta.len() - 0x14) as u32;
         meta[0..4].copy_from_slice(&0x403u32.to_le_bytes());
-        meta[4..8].copy_from_slice(&((meta.len() - 0x14) as u32).to_le_bytes());
+        meta[4..8].copy_from_slice(&meta_len.to_le_bytes());
         meta[8..12].copy_from_slice(&((code.len() / 4) as u32).to_le_bytes());
         meta[0x14] = 0x40;
         meta[FSPX_RECORDS] = 0x43;
