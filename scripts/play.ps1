@@ -88,6 +88,7 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
 # is separately opt-in with VICTORY_GPU_OVERLAP=1; release launches are unchanged
 # unless VICTORY_MESH_FALLBACK=1 is explicitly requested.
 $UseLowVramProfile = ($env:VICTORY_MESH_FALLBACK -eq "1") -or ($ProfileName -eq "diag")
+$PipelineJournalEnabled = ![string]::IsNullOrWhiteSpace($env:VICTORY_PIPELINE_JOURNAL) -and $env:VICTORY_PIPELINE_JOURNAL -ne "0"
 if ($UseLowVramProfile) {
     $MeshFallbackDefaults = [ordered]@{
         VICTORY_DISPLAY_MODE = "1280x720"
@@ -113,7 +114,9 @@ if ($UseLowVramProfile) {
         VICTORY_MESH_SHARED_SPARE_MB = "32"
         # Leave CPU headroom for the title instead of saturating all logical processors.
         VICTORY_DSTORAGE_WORKERS = "3"
-        VICTORY_PIPELINE_WORKERS = "2"
+        # Serialize PSO creation during journal runs so a driver crash leaves one identifiable pending pipeline.
+        # Explicit process overrides still take precedence in the loop below.
+        VICTORY_PIPELINE_WORKERS = $(if ($PipelineJournalEnabled) { "1" } else { "2" })
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
         # Native RDNA2 FSPX pipelines remain experimental until the corpus translates.
         VICTORY_EXPERIMENTAL_FSPX = "0"
@@ -204,8 +207,10 @@ $Report.Add("os=$([Environment]::OSVersion.VersionString)")
 # active; the launcher deliberately does not erase explicit user choices.
 $Report.Add("")
 $Report.Add("[effective VICTORY_* environment]")
+$PipelineJournalValue = [Environment]::GetEnvironmentVariable("VICTORY_PIPELINE_JOURNAL", "Process")
+$Report.Add("VICTORY_PIPELINE_JOURNAL=$PipelineJournalValue")
 [Environment]::GetEnvironmentVariables("Process").GetEnumerator() |
-    Where-Object { $_.Key -like "VICTORY_*" } |
+    Where-Object { $_.Key -like "VICTORY_*" -and $_.Key -ne "VICTORY_PIPELINE_JOURNAL" } |
     Sort-Object Key |
     ForEach-Object { $Report.Add("$($_.Key)=$($_.Value)") }
 

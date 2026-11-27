@@ -406,6 +406,19 @@ impl HostPipeline {
         // For the report when the host device is removed: what this thread
         // has in the library from here on.
         super::library::label(format!("{shaders:?}"));
+        // Keep a durable note while the driver compiles this translated PSO.
+        // Some driver faults end the process before D3D12 can return an HRESULT.
+        let key = shaders
+            .iter()
+            .map(|shader| shader.hash.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
+        let detail = shaders
+            .iter()
+            .map(|shader| format!("{}-{}", shader.stage.to_lowercase(), shader.container.len()))
+            .collect::<Vec<_>>()
+            .join("+");
+        let _pending = super::journal::enter(&key, &detail)?;
         let find = |stage| shaders.iter().find(|s| s.stage == stage);
         let compute = match shaders {
             [cs] if cs.stage == "compute" => Some(cs),

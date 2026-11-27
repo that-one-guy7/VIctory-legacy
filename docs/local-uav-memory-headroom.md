@@ -63,9 +63,9 @@ unless a process-level value is already set:
 
 - `VICTORY_MESH_LOCAL_BUDGET_MB=128`: limits retained local mesh scratch to
   128 MiB; new scratch beyond the limit uses CPU-visible shared memory.
-- `VICTORY_MESH_SHARED_SPARE_MB=128`: after a list's submission finishes,
+- `VICTORY_MESH_SHARED_SPARE_MB=32`: after a list's submission finishes,
   its shared-memory mesh scratch chunks are returned to one process-wide
-  reuse cache. The cache evicts old chunks over 128 MiB, releasing their
+  reuse cache. The cache evicts old chunks over 32 MiB, releasing their
   system RAM. This avoids every long-lived host list retaining a private
   collection of shared chunks. Scratch concurrently needed by one submission
   is not capped by this idle-cache limit.
@@ -78,8 +78,9 @@ unless a process-level value is already set:
   because one target was at 0.5 scale while the other remained at 1.0. Keep
   target scaling opt-in until the wrapper can safely handle those mixed-scale
   copy dependencies.
-- `VICTORY_TEXTURE_MIP_DROP=2`: eligible large sampled textures omit their
-  top two mip levels on the host copy.
+- `VICTORY_TEXTURE_MIP_DROP=3`: eligible large sampled textures omit their
+  top three mip levels on the host copy. This is the most aggressive supported
+  preset and can noticeably reduce texture detail; do not increase it further.
 
 The render-scale and mip-drop paths each have eligibility limits described
 in their respective documentation. They do not rewrite the title's resource
