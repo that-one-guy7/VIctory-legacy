@@ -1,5 +1,3 @@
-#[cfg(test)]
-mod tests {
     use crate::emit::lower::{Lowered, Numeric, Parts, buffer_format, half_shift, lower};
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
@@ -622,4 +620,3 @@ mod tests {
         // A 16-bit float is a half already, sign included.
         assert_eq!(half(0xBC00 << half_shift(16)), -1.0);
     }
-}
