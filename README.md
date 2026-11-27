@@ -123,6 +123,42 @@ These changes can reduce image quality and performance, do not cap every
 D3D12 allocation, and do not guarantee correct rendering or playable
 performance.
 
+### Native FSPX compute pipelines and frame overlap
+
+The Xbox D3D12 device method at slot `0x218` is
+`DeserializeComputePipelineStateX`. It supplies precompiled RDNA2 compute
+program sections (FSPX packet, optional metadata/hash, code, and resource
+metadata), rather than a DXIL shader blob. The wrapper now assembles those
+sections into an `ACCC` container, parses FSPX native compute metadata, and
+routes the program through the existing compute-shader translator. This
+addresses a concrete missing-pipeline path that the diagnostic log showed
+being called repeatedly. The implementation is covered by parser and device
+method unit tests, but the real game's complete FSPX corpus still needs
+hardware validation.
+
+The diagnostic low-VRAM launch profile also sets
+`VICTORY_LATE_WAIT=3` and `VICTORY_RELAY=2`. Stage 3 lets CPU recording
+overlap GPU execution and moves presentation behind queued work; the relay
+lands completed submissions and compares/merges shader-written title buffers
+on a separate worker instead of blocking the submission thread. This targets
+the large per-frame title-buffer copy-back cost in the diagnostic log. It may
+improve throughput where the GPU was idle while the wrapper prepared work.
+Stage 3 skips the diagnostics-only per-present black-frame readback; explicit
+saved/captured frames still synchronize. Both settings can keep more work in
+flight, so compare local VRAM and TDR behavior after the change. Set
+`VICTORY_LATE_WAIT=0` and `VICTORY_RELAY=0` to disable them for an A/B run.
+Explicit process variables always take precedence: an inherited
+`VICTORY_MESH_SHARED_SPARE_MB=128`, for example, overrides the 32 MiB
+low-VRAM preset. The launcher now prints a warning for that mismatch.
+
+The latest uploaded GTX 1050 Ti run ended with `DXGI_ERROR_DEVICE_HUNG`
+(`0x887A0006`) and a TDR, not an allocation failure. It also recorded
+hundreds-of-milliseconds queue/frame samples and about 1 GiB of shader-written
+title-buffer ranges to compare each frame. The log does not identify one
+specific invalid GPU command, so this change targets the confirmed missing
+compute path and the measured CPU/GPU submission gap without claiming the TDR
+is already fixed or promising a particular frame rate.
+
 ### Follow-up GTX 1050 Ti crash run before PR #32 (2026-11-26, 21:54 local / -06:00)
 
 This run was built before PR #32 was merged. Its final memory report still says

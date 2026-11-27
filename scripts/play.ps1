@@ -110,6 +110,11 @@ if ($UseLowVramProfile) {
         # Leave CPU headroom for the title instead of saturating all logical processors.
         VICTORY_DSTORAGE_WORKERS = "3"
         VICTORY_PIPELINE_WORKERS = "2"
+        # Let the CPU prepare the next frame while the GPU finishes the previous present.
+        # Stage 3 skips the per-present black-frame diagnostic readback; explicit captures still synchronize.
+        VICTORY_LATE_WAIT = "3"
+        # Copy shader-written title buffers back on a worker while submissions continue.
+        VICTORY_RELAY = "2"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
     }
     foreach ($Name in $MeshFallbackDefaults.Keys) {
@@ -118,6 +123,10 @@ if ($UseLowVramProfile) {
         }
     }
     Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
+        Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
+    }
+    Write-Host "GPU overlap: VICTORY_LATE_WAIT=$env:VICTORY_LATE_WAIT; copy-back relay=$env:VICTORY_RELAY (stage 3 skips the per-present black-frame diagnostic readback)." -ForegroundColor Cyan
     Write-Host "Length-bounded title-memory window grid: $env:VICTORY_WINDOW_KB KiB; unsized root views remain 4 MiB." -ForegroundColor Cyan
 }
 
