@@ -1054,6 +1054,9 @@ fn page_faults() -> u64 {
 /// second or more: a 4 s frame after an unlogged 4 s frame showed two
 /// frames' counts as one's).
 pub(crate) fn log(frames: f64) {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    crate::descriptor::descriptor_sync_line(frames);
+
     let counted = COUNT[C::Frames as usize].swap(0, Relaxed);
     let frames = if counted > 0 { counted as f64 } else { frames };
     static FAULTS: AtomicU64 = AtomicU64::new(0);
