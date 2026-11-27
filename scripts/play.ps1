@@ -92,7 +92,12 @@ $PipelineJournalEnabled = ![string]::IsNullOrWhiteSpace($env:VICTORY_PIPELINE_JO
 if ($UseLowVramProfile) {
     $MeshFallbackDefaults = [ordered]@{
         VICTORY_DISPLAY_MODE = "1280x720"
-        VICTORY_CARD_BUFFERS = "0"
+        # Large title-buffer copies may live in local GPU memory when the
+        # adapter has safe headroom. The runtime caps these at 128 MiB and
+        # falls back to CPU-backed copies when its budget checks refuse them.
+        VICTORY_CARD_BUFFERS = "1"
+        VICTORY_CARD_BUFFERS_MIN_MB = "64"
+        VICTORY_CARD_BUFFERS_MB = "128"
         VICTORY_CARD_REHASH_RUNS = "1"
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
@@ -130,13 +135,44 @@ if ($UseLowVramProfile) {
             [Environment]::SetEnvironmentVariable($Name, $MeshFallbackDefaults[$Name], "Process")
         }
     }
-    # The latest GTX 1050 Ti log hung while one synchronous submission contained
-    # 12 host lists (2.6 s). For diagnostics, submit and wait each host list
-    # separately, with command timestamps, so large batches cannot hide the
-    # slow list. This is diagnostics-only and adds synchronization overhead.
-    if ($ProfileName -eq "diag" -and
-        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("VICTORY_GPU_TIMING", "Process"))) {
-        $env:VICTORY_GPU_TIMING = "1"
+    # The low-VRAM profile has bounded GPU-local shadows for only large
+    # title buffers. Honour them even if a previous launcher run left older
+    # values in this PowerShell process; opt out only with the explicit marker.
+    if ($UseLowVramProfile -and $env:VICTORY_CARD_BUFFERS_OVERRIDE -ne "1") {
+        $env:VICTORY_CARD_BUFFERS = "1"
+        $env:VICTORY_CARD_BUFFERS_MIN_MB = "64"
+        $env:VICTORY_CARD_BUFFERS_MB = "128"
+    }
+
+    # A prior shell session can leave VICTORY_RENDER_SCALE=1.0 behind. The
+    # diagnostic low-VRAM profile clamps it to a safe eligible-target scale;
+    # use VICTORY_RENDER_SCALE_OVERRIDE=1 to run a deliberate A/B test above 0.5.
+    if ($ProfileName -eq "diag" -and $env:VICTORY_RENDER_SCALE_OVERRIDE -ne "1") {
+        $ScaleValue = 0.0
+        $ScaleText = [Environment]::GetEnvironmentVariable("VICTORY_RENDER_SCALE", "Process")
+        $ScaleValid = [double]::TryParse(
+            $ScaleText,
+            [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$ScaleValue
+        )
+        if (!$ScaleValid -or $ScaleValue -lt 0.25 -or $ScaleValue -gt 0.5) {
+            if ($ScaleText -ne "0.5") {
+                Write-Warning "Clamping VICTORY_RENDER_SCALE='$ScaleText' to 0.5 for the diag low-VRAM profile. Set VICTORY_RENDER_SCALE_OVERRIDE=1 to bypass this guard."
+            }
+            $env:VICTORY_RENDER_SCALE = "0.5"
+        }
+    }
+
+    # Per-list GPU timing fences every host list and severely reduced GPU
+    # throughput in the latest run. Keep it off by default; opt in explicitly
+    # for a focused TDR trace with VICTORY_GPU_TIMING_OVERRIDE=1.
+    if ($ProfileName -eq "diag") {
+        if ($env:VICTORY_GPU_TIMING_OVERRIDE -eq "1") {
+            $env:VICTORY_GPU_TIMING = "1"
+        } else {
+            Remove-Item Env:VICTORY_GPU_TIMING -ErrorAction SilentlyContinue
+        }
     }
 
     # Keep diagnostic runs synchronous unless the experimental overlap path is explicitly requested.
@@ -164,7 +200,7 @@ if ($UseLowVramProfile) {
     } else {
         Write-Host "Native FSPX compute handling: disabled; slot 0x218 keeps its previous E_NOTIMPL fallback behavior." -ForegroundColor Cyan
     }
-    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; indirect windowing=$env:VICTORY_INDIRECT_WINDOW; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS." -ForegroundColor Cyan
+    Write-Host "Low-VRAM launch profile: title mode $env:VICTORY_DISPLAY_MODE; render scale=$env:VICTORY_RENDER_SCALE; texture mip drop=$env:VICTORY_TEXTURE_MIP_DROP; indirect windowing=$env:VICTORY_INDIRECT_WINDOW; mesh-local scratch cap=$env:VICTORY_MESH_LOCAL_BUDGET_MB MiB; shared scratch cache=$env:VICTORY_MESH_SHARED_SPARE_MB MiB; DirectStorage workers=$env:VICTORY_DSTORAGE_WORKERS; pipeline workers=$env:VICTORY_PIPELINE_WORKERS; optional UAV threshold=$env:VICTORY_LOCAL_UAV_BUDGET_PERCENT%; GPU-local title-buffer copies=$env:VICTORY_CARD_BUFFERS (minimum=$env:VICTORY_CARD_BUFFERS_MIN_MB MiB, cap=$env:VICTORY_CARD_BUFFERS_MB MiB)." -ForegroundColor Cyan
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
         Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
     }
@@ -193,7 +229,11 @@ if ($ProfileName -eq "diag" -and
     $env:VICTORY_D3D12_DRED = "1"
 }
 if ($ProfileName -eq "diag") {
-    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$env:VICTORY_GPU_TIMING." -ForegroundColor Cyan
+    $GpuTimingStatus = "OFF (throughput mode)"
+    if ($env:VICTORY_GPU_TIMING -eq "1") {
+        $GpuTimingStatus = "ON (per-list fence waits; diagnostic only)"
+    }
+    Write-Host "D3D12 diagnostics: DRED=$env:VICTORY_D3D12_DRED; debug layer=$env:VICTORY_D3D12_DEBUG; per-list GPU timing=$GpuTimingStatus." -ForegroundColor Cyan
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
