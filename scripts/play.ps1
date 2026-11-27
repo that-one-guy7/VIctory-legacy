@@ -113,6 +113,9 @@ if ($UseLowVramProfile) {
         # Let the CPU prepare the next frame while the GPU finishes the previous present.
         # Stage 3 skips the per-present black-frame diagnostic readback; explicit captures still synchronize.
         VICTORY_LATE_WAIT = "3"
+        # The GTX 1050 Ti run reached 138 lists / 15 submissions ahead and exceeded its local-memory budget.
+        # Limit the queued backlog without disabling asynchronous CPU/GPU overlap.
+        VICTORY_LATE_WAIT_LISTS = "64"
         # Copy shader-written title buffers back on a worker while submissions continue.
         VICTORY_RELAY = "2"
         VICTORY_LOCAL_UAV_BUDGET_PERCENT = "70"
@@ -126,7 +129,7 @@ if ($UseLowVramProfile) {
     if ($env:VICTORY_MESH_SHARED_SPARE_MB -ne "32") {
         Write-Warning "VICTORY_MESH_SHARED_SPARE_MB=$env:VICTORY_MESH_SHARED_SPARE_MB is an explicit override; the low-VRAM preset is 32 MiB. Remove the process override to use the preset."
     }
-    Write-Host "GPU overlap: VICTORY_LATE_WAIT=$env:VICTORY_LATE_WAIT; copy-back relay=$env:VICTORY_RELAY (stage 3 skips the per-present black-frame diagnostic readback)." -ForegroundColor Cyan
+    Write-Host "GPU overlap: VICTORY_LATE_WAIT=$env:VICTORY_LATE_WAIT; in-flight list cap=$env:VICTORY_LATE_WAIT_LISTS; copy-back relay=$env:VICTORY_RELAY (stage 3 skips the per-present black-frame diagnostic readback)." -ForegroundColor Cyan
     Write-Host "Length-bounded title-memory window grid: $env:VICTORY_WINDOW_KB KiB; unsized root views remain 4 MiB." -ForegroundColor Cyan
 }
 

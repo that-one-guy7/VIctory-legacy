@@ -30,6 +30,8 @@ pub enum ShaderError {
     NotDxbc,
     #[error("malformed shader: {0}")]
     Malformed(&'static str),
+    #[error("malformed shader: FSPX resource has unsupported root type {0}")]
+    FspxRootType(u8),
     #[error("GFX10 code at {offset:#x}: {reason}")]
     Isa { offset: usize, reason: &'static str },
     /// Valid code the translator cannot handle yet: an opcode name or a construct.
