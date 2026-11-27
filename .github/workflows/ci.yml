@@ -88,6 +88,7 @@ jobs:
             'VICTORY_D3D12_DEBUG = "1"',
             'VICTORY_WINDOW_KB = "1024"',
             'VICTORY_RENDER_SCALE = "1.0"',
+            '$env:VICTORY_RENDER_SCALE_OVERRIDE -ne "1"',
             'VICTORY_TEXTURE_MIP_DROP = "3"',
             'VICTORY_CARD_BUFFERS = "1"',
             'VICTORY_CARD_BUFFERS_MIN_MB = "64"',
