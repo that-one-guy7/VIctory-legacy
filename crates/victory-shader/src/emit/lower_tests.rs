@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::{Lowered, Numeric, Parts, buffer_format, half_shift, lower};
+    use crate::emit::lower::{Lowered, Numeric, Parts, buffer_format, half_shift, lower};
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
     };
@@ -14,21 +14,21 @@ mod tests {
         // Non-expanded indexed draws store global indices in the shared
         // vertex buffer: group 3 starts after 3 * 128 vertex records.
         assert_eq!(
-            super::mesh_index_values(&local, Some(3 * 128), |index, base| index + base),
+            crate::emit::lower::mesh_index_values(&local, Some(3 * 128), |index, base| index + base),
             [384, 385, 386]
         );
         // Expanded draws keep local indices because mesh_vs adds the group
         // base when it resolves SV_VertexID for each corner.
         assert_eq!(
-            super::mesh_index_values(&local, None, |index, base| index + base),
+            crate::emit::lower::mesh_index_values(&local, None, |index, base| index + base),
             local
         );
     }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {
-        use super::super::container::SigElement;
-        use super::half_input_partners;
+        use crate::emit::container::SigElement;
+        use crate::emit::lower::half_input_partners;
         use crate::native::{PsInput, Usage};
         let entry = |row, row2, pack2| PsInput {
             usage: Usage::Generic,
@@ -72,8 +72,8 @@ mod tests {
     /// with a dword left, and is not a half of its register's row.
     #[test]
     fn packed_elements_behind_another_take_the_first_free_dword() {
-        use super::super::container::SigElement;
-        use super::packed_half;
+        use crate::emit::container::SigElement;
+        use crate::emit::lower::packed_half;
         let element = |index, row, col, cols| SigElement {
             name: "TEXCOORD".into(),
             index,
