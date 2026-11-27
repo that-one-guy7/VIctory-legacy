@@ -15,6 +15,7 @@ const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 const OOM_RETRY_MS: u64 = 500;
 const GPU_BUDGET_PRESSURE_PERCENT: u64 = 90;
+const GPU_BUDGET_RECOVERY_PERCENT: u64 = 80;
 const GPU_PRESSURE_IDLE_MS: u64 = 1_000;
 const GPU_PRESSURE_IDLE_FRAMES: u64 = 1;
 const CRITICAL_PHYSICAL_FREE: u64 = 512 * MIB;
@@ -109,9 +110,15 @@ pub(crate) fn refresh() {
     if let Some([local_budget, local_used, shared_budget, shared_used]) =
         crate::host::host().and_then(|host| host.video_memory())
     {
-        let gpu_pressure =
-            gpu_budget_pressure(local_budget, local_used, GPU_BUDGET_PRESSURE_PERCENT)
-                || gpu_budget_pressure(shared_budget, shared_used, GPU_BUDGET_PRESSURE_PERCENT);
+        // Use hysteresis so small DXGI budget fluctuations do not make
+        // staging repeatedly stop and restart around one threshold.
+        let threshold = if GPU_PRESSURED.load(Ordering::Relaxed) {
+            GPU_BUDGET_RECOVERY_PERCENT
+        } else {
+            GPU_BUDGET_PRESSURE_PERCENT
+        };
+        let gpu_pressure = gpu_budget_pressure(local_budget, local_used, threshold)
+            || gpu_budget_pressure(shared_budget, shared_used, threshold);
         let was_gpu_pressure = GPU_PRESSURED.swap(gpu_pressure, Ordering::Relaxed);
         if gpu_pressure != was_gpu_pressure {
             if gpu_pressure {
@@ -222,11 +229,19 @@ fn pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
 }
 
 fn gpu_pressure_idle_timeout_ms(pressured: bool, normal: u64) -> u64 {
-    if pressured { normal.min(GPU_PRESSURE_IDLE_MS) } else { normal }
+    if pressured {
+        normal.min(GPU_PRESSURE_IDLE_MS)
+    } else {
+        normal
+    }
 }
 
 fn gpu_pressure_idle_timeout_frames(pressured: bool, normal: u64) -> u64 {
-    if pressured { normal.min(GPU_PRESSURE_IDLE_FRAMES) } else { normal }
+    if pressured {
+        normal.min(GPU_PRESSURE_IDLE_FRAMES)
+    } else {
+        normal
+    }
 }
 
 pub(crate) fn idle_timeout_ms(normal: u64) -> u64 {
@@ -254,8 +269,10 @@ mod tests {
     #[test]
     fn gpu_budget_pressure_uses_a_strict_budget_threshold() {
         assert!(!gpu_budget_pressure(4_000, 3_599, 90));
-        assert!(gpu_budget_pressure(4_000, 3_600, 90));
-        assert!(gpu_budget_pressure(4_000, 4_100, 90));
+        assert!(gpu_budget_pressure(4_000, 3_600, GPU_BUDGET_PRESSURE_PERCENT));
+        assert!(gpu_budget_pressure(4_000, 4_100, GPU_BUDGET_PRESSURE_PERCENT));
+        assert!(!gpu_budget_pressure(4_000, 3_199, GPU_BUDGET_RECOVERY_PERCENT));
+        assert!(gpu_budget_pressure(4_000, 3_200, GPU_BUDGET_RECOVERY_PERCENT));
         assert!(!gpu_budget_pressure(0, u64::MAX, 90));
         assert!(gpu_budget_pressure(u64::MAX, u64::MAX, 100));
     }
