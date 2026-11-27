@@ -77,7 +77,7 @@ jobs:
             'VICTORY_D3D12_DEBUG = "1"',
             'VICTORY_WINDOW_KB = "1024"',
             'VICTORY_TEXTURE_MIP_DROP = "3"',
-            'VICTORY_INDIRECT_WINDOW = "1"',
+            'VICTORY_INDIRECT_WINDOW = "0"',
             'VICTORY_MESH_SHARED_SPARE_MB = "32"',
             'VICTORY_DSTORAGE_WORKERS = "3"',
             'VICTORY_PIPELINE_WORKERS = $(if ($PipelineJournalEnabled) { "1" } else { "2" })',
