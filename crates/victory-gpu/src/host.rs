@@ -1592,13 +1592,27 @@ impl Pool {
     }
 
     fn reset(&mut self) {
+        // The command list has finished. Keep local-VRAM scratch only while
+        // the adapter remains below the same 80% threshold used for new
+        // local allocations. Under memory pressure, release idle local chunks
+        // instead of retaining them indefinitely; later requests can use the
+        // shared-memory fallback until the adapter has headroom again.
+        let keep_local = host()
+            .and_then(|host| host.video_memory())
+            .map(|[budget, used, ..]| retain_idle_local_mesh_scratch(budget, used))
+            .unwrap_or(true);
         let mut local = Vec::with_capacity(self.chunks.len());
         for mut chunk in self.chunks.drain(..) {
             chunk.used = 0;
             if chunk.local {
-                // Keep the bounded local-VRAM pool with this list, as before.
-                chunk.touched = false;
-                local.push(chunk);
+                if keep_local {
+                    chunk.touched = false;
+                    local.push(chunk);
+                } else {
+                    // Dropping a completed local chunk releases its VRAM and
+                    // decrements the aggregate mesh-pool accounting.
+                    drop(chunk);
+                }
             } else {
                 // A completed submission leaves shared mesh scratch in UAV state.
                 // Return it to the process-wide cache for another list to reuse.
@@ -6784,6 +6798,27 @@ fn mesh_local_budget_allows(budget: u64, used: u64, request: u64) -> bool {
     }
     let limit = budget / 100 * 80;
     used < limit && request <= limit - used
+}
+
+/// Whether a completed list may retain its idle device-local mesh chunks.
+/// Unknown budgets preserve the existing cache; a known budget follows the
+/// same 80% headroom threshold used when creating new local chunks.
+fn retain_idle_local_mesh_scratch(budget: u64, used: u64) -> bool {
+    mesh_local_budget_allows(budget, used, 0)
+}
+
+#[cfg(test)]
+mod idle_mesh_scratch_budget_tests {
+    use super::retain_idle_local_mesh_scratch;
+
+    #[test]
+    fn idle_local_chunks_are_released_at_the_80_percent_budget_threshold() {
+        assert!(retain_idle_local_mesh_scratch(1_000, 799));
+        assert!(!retain_idle_local_mesh_scratch(1_000, 800));
+        assert!(!retain_idle_local_mesh_scratch(1_000, 950));
+        // No reliable budget measurement: retain the old conservative behavior.
+        assert!(retain_idle_local_mesh_scratch(0, u64::MAX));
+    }
 }
 
 /// Atomically reserves bytes across every HostList's mesh pools.
