@@ -64,7 +64,7 @@ stage-3 path omits the diagnostics-only per-present black-frame readback.
 
 ## Experimental render-resolution scaling
 
-`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general default is `1.0` (off); the `diag` low-VRAM launcher preset defaults to `0.5` on 4 GB-class testing systems, unless an explicit process value is already set. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure. Set `VICTORY_RENDER_SCALE=1.0` to disable the diagnostic preset's scaling.
+`VICTORY_RENDER_SCALE=0.5` reduces eligible host-side 2D render/depth targets to half width and height. The general default is `1.0` (off); the `diag` low-VRAM launcher preset clamps the value to `0.5` or lower on 4 GB-class testing systems so stale PowerShell environment values cannot silently disable the reduction. The default minimum original dimension is 512 pixels; override it with `VICTORY_RENDER_SCALE_MIN_SIZE`. To deliberately test a larger scale (including native size), set `VICTORY_RENDER_SCALE_OVERRIDE=1` and then set `VICTORY_RENDER_SCALE` to the desired value. This is an experimental memory/performance trade-off, not a general game graphics setting. See [docs/render-resolution-scale.md](docs/render-resolution-scale.md) for eligibility rules, limitations and the test procedure.
 
 ## Diagnostic log
 
@@ -145,23 +145,29 @@ When `VICTORY_MESH_FALLBACK=1` is set, or the executable is built with the
 default. The diagnostic profile uses this preset for the GTX 1050 Ti
 crash-reproduction path because the runtime may select compute/vertex mesh
 fallback automatically when native mesh shaders are unavailable; no manual
-fallback flag is required. Explicit `VICTORY_*` values take precedence.
-Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
-title-buffer shadows, half-size eligible host render/depth targets
-(`VICTORY_RENDER_SCALE=0.5`; explicit overrides are honored), three dropped
-top mip levels on eligible large sampled textures, with indirect-window batching disabled by default
-(`VICTORY_INDIRECT_WINDOW=0`; it remains available for explicit A/B testing), a 1 MiB grid for length-bounded title-memory windows
-(`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
-128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
-cache, and a 70% local-memory threshold for optional UAV optimizations. The
-low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
+fallback flag is required. Most preset values still honour explicit process
+settings. The diagnostic low-VRAM profile has three deliberate exceptions to
+avoid stale values defeating the tested safety settings: eligible host render
+and depth targets are scaled to at most half size unless
+`VICTORY_RENDER_SCALE_OVERRIDE=1`; GPU-local shadows are enabled only for title
+buffers at least 64 MiB, with a 128 MiB aggregate cap
+(`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
+`VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`; and
+per-list GPU timing is disabled by default because its fence wait after every
+host list significantly reduced throughput. To opt into that diagnostic mode,
+set `VICTORY_GPU_TIMING_OVERRIDE=1`. The GPU-local buffer copies are only
+attempted while adapter budget checks permit them; if the budget is too tight,
+the runtime falls back to its ordinary CPU-backed copies. The preset otherwise
+uses title mode `1280x720`, three dropped top mip levels on eligible large
+sampled textures, indirect-window batching disabled by default
+(`VICTORY_INDIRECT_WINDOW=0`), a 1 MiB grid for length-bounded title-memory
+windows (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows),
+a 128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch
+reuse cache, and a 70% local-memory threshold for optional UAV optimizations.
+The low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
 compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
-system. Diagnostic builds additionally default to `VICTORY_GPU_TIMING=1`, which
-submits and waits for each host list separately and records its GPU command
-timings; this trades throughput for smaller batches and more useful TDR
-diagnostics. Remove the variable from the process environment to disable it.
-This can lengthen asset streaming and shader warm-up; explicit environment
-overrides remain available. ### Conservative LDS fixes for 32-lane hosts
+system. These settings reduce some avoidable memory/copy overhead but cannot
+cap every D3D12 allocation or guarantee a stable frame rate on a 4 GB adapter. ### Conservative LDS fixes for 32-lane hosts
 
 Some console wave64 compute programs are refused by D3D12 adapters whose
 widest wave is 32 lanes. Two deliberately narrow recovery checks are
