@@ -636,19 +636,30 @@ pub(crate) extern "system" fn deserialize_compute_x(
     iid: *const Iid,
     out: *mut This,
 ) -> HRESULT {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller supplied a writable output pointer.
+    unsafe { *out = std::ptr::null() };
+    if iid.is_null() {
+        return E_INVALIDARG;
+    }
     // SAFETY: the title passes a description (null is tolerated).
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return E_INVALIDARG;
     };
-    if out.is_null() || iid.is_null() {
-        return E_INVALIDARG;
-    }
     let Some(fspx) = assemble_fspx(desc) else {
         tracing::warn!("DeserializeComputePipelineStateX: invalid or incomplete FSPX parts");
-        // SAFETY: the caller supplied a writable output pointer.
-        unsafe { *out = std::ptr::null() };
         return E_INVALIDARG;
     };
+    if let Some([x, y, z, flags]) = packet_threads(desc) {
+        tracing::debug!(
+            threads = ?(x, y, z),
+            wave32 = flags & (1 << 4) != 0,
+            code = desc.kind6_size,
+            "DeserializeComputePipelineStateX"
+        );
+    }
     let container = victory_shader::dxbc::build(&[(victory_shader::FourCC::ACCC, &fspx)]);
     hand_out(
         vec![shader("compute", &container)],
@@ -883,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_compute_x_builds_a_translatable_accc_pipeline() {
+    fn deserialize_compute_x_builds_a_parseable_accc_pipeline() {
         let mut k0 = [0u8; 0x1c];
         k0[0x0c..0x0e].copy_from_slice(&8u16.to_le_bytes());
         k0[0x0e..0x10].copy_from_slice(&16u16.to_le_bytes());
@@ -932,6 +943,8 @@ mod tests {
         assert_eq!(programs[0].code, code);
         assert!(!programs[0].wave64);
         assert_eq!(packet_threads(&desc), Some([8, 16, 1, 1 << 4]));
+        victory_shader::emit::translate(container)
+            .expect("ACCC compute shader should use the ordinary translator");
         object::release_boxed::<Pipeline>(pipeline_ptr);
     }
 
