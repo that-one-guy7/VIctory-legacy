@@ -124,9 +124,9 @@ details, limitations, validation status, and the next acceptance gates. The
 is a useful reference but is a separate, newer code line and is not merged
 wholesale into this repository.
 
-### Latest GTX 1050 Ti crash run (2026-11-27)
+### Latest GTX 1050 Ti crash run (2026-11-26, 20:56 local / -06:00)
 
-The new run reached frame 2,876, then failed while recording a host texture
+The 2026-11-26 20:56 local run (-06:00) reached frame 2,876, then failed while recording a host texture
 state prelude with D3D12 `E_OUTOFMEMORY (0x8007000E)`; the launcher exited with
 `0x887A0005`. The GPU-budget pressure handler did activate and texture staging
 had fallen to 24 MiB, so the previous residency guard was running but did not
