@@ -76,7 +76,12 @@ fn critical_memory(physical: u64, commit: u64) -> bool {
 /// Whether a DXGI memory segment has reached the configured budget threshold.
 /// A missing/zero budget is treated as unknown rather than as pressure.
 fn gpu_budget_pressure(budget: u64, used: u64, percent: u64) -> bool {
-    budget != 0 && used >= budget.saturating_mul(percent.min(100)) / 100
+    if budget == 0 {
+        return false;
+    }
+    let percent = percent.min(100);
+    let limit = (budget / 100) * percent + (budget % 100) * percent / 100;
+    used >= limit
 }
 
 /// Called by the once-per-second host maintenance sweep.
@@ -174,7 +179,8 @@ fn warn_deferred(now: u64, bytes: u64, reason: &'static str, physical: u64, comm
 }
 
 /// Whether a newly sampled texture may allocate its host upload staging buffer.
-/// Existing textures and in-flight lists are untouched and can still render.
+/// Existing staging and in-flight lists are untouched; a new texture may be
+/// deferred and retried on a later use.
 pub(crate) fn allow_texture_staging(bytes: u64) -> bool {
     let now = crate::host::now_ms();
     if GPU_PRESSURED.load(Ordering::Relaxed) {
@@ -267,7 +273,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gpu_budget_pressure_uses_a_strict_budget_threshold() {
+    fn gpu_budget_pressure_uses_threshold_and_ignores_unknown_budgets() {
         assert!(!gpu_budget_pressure(4_000, 3_599, 90));
         assert!(gpu_budget_pressure(4_000, 3_600, GPU_BUDGET_PRESSURE_PERCENT));
         assert!(gpu_budget_pressure(4_000, 4_100, GPU_BUDGET_PRESSURE_PERCENT));
