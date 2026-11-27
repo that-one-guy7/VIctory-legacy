@@ -436,9 +436,6 @@ pub(crate) fn is_texture_view(view: &View) -> bool {
 /// ([`buffer_view_ok`]), since the start.
 pub(crate) static REFUSED_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Whether the host device is gone, and why (the first time it is asked
-/// after that): for passes that make many views, to name the one that did
-/// it.
 /// Whether a newly observed out-of-range descriptor index merits a log entry.
 /// Log once on the first observation and then at most once per 64K-slot bucket.
 const OUT_OF_RANGE_WARNING_SHIFT: u32 = 16;
@@ -449,6 +446,9 @@ fn out_of_range_warning_due(previous: u32, index: u32) -> bool {
             || (previous >> OUT_OF_RANGE_WARNING_SHIFT) != (index >> OUT_OF_RANGE_WARNING_SHIFT))
 }
 
+/// Whether the host device is gone, and why (the first time it is asked
+/// after that): for passes that make many views, to name the one that did
+/// it.
 pub(crate) fn device_removed() -> Option<String> {
     let host = host()?;
     // SAFETY: a plain query.
