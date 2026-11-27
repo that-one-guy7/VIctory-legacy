@@ -137,15 +137,19 @@ method unit tests, but the real game's complete FSPX corpus still needs
 hardware validation.
 
 The diagnostic low-VRAM launch profile also sets
-`VICTORY_LATE_WAIT=3`. This allows CPU recording to overlap GPU execution and
-moves presentation behind queued work. It may improve throughput where the
-GPU was idle while the wrapper prepared submissions. Stage 3 skips the
-diagnostics-only per-present black-frame readback; explicit saved/captured
-frames still synchronize. It can keep more work in flight, so compare local
-VRAM and TDR behavior after the change. Set `VICTORY_LATE_WAIT=0` to disable
-the overlap for an A/B run. Explicit process variables always take precedence:
-an inherited `VICTORY_MESH_SHARED_SPARE_MB=128`, for example, overrides the
-32 MiB low-VRAM preset. The launcher now prints a warning for that mismatch.
+`VICTORY_LATE_WAIT=3` and `VICTORY_RELAY=2`. Stage 3 lets CPU recording
+overlap GPU execution and moves presentation behind queued work; the relay
+lands completed submissions and compares/merges shader-written title buffers
+on a separate worker instead of blocking the submission thread. This targets
+the large per-frame title-buffer copy-back cost in the diagnostic log. It may
+improve throughput where the GPU was idle while the wrapper prepared work.
+Stage 3 skips the diagnostics-only per-present black-frame readback; explicit
+saved/captured frames still synchronize. Both settings can keep more work in
+flight, so compare local VRAM and TDR behavior after the change. Set
+`VICTORY_LATE_WAIT=0` and `VICTORY_RELAY=0` to disable them for an A/B run.
+Explicit process variables always take precedence: an inherited
+`VICTORY_MESH_SHARED_SPARE_MB=128`, for example, overrides the 32 MiB
+low-VRAM preset. The launcher now prints a warning for that mismatch.
 
 The latest uploaded GTX 1050 Ti run ended with `DXGI_ERROR_DEVICE_HUNG`
 (`0x887A0006`) and a TDR, not an allocation failure. It also recorded
