@@ -126,8 +126,8 @@ wholesale into this repository.
 
 ### Latest GTX 1050 Ti crash run (2026-11-26, 20:56 local / -06:00)
 
-The 2026-11-26 20:56 local run (-06:00) reached frame 2,876, then failed while recording a host texture
-state prelude with D3D12 `E_OUTOFMEMORY (0x8007000E)`; the launcher exited with
+The 2026-11-26 20:56 local run (-06:00) reached frame 2,876, then failed while recording a host texture-state
+prelude with D3D12 `E_OUTOFMEMORY (0x8007000E)`; the launcher exited with
 `0x887A0005`. The GPU-budget pressure handler did activate and texture staging
 had fallen to 24 MiB, so the previous residency guard was running but did not
 cover the larger remaining pools.
@@ -148,10 +148,11 @@ diagnostic launcher now applies the low-VRAM defaults to `diag` builds and
 enables the D3D12 debug layer on every `diag` launch. Explicit settings still
 win, and release launches remain unchanged unless the fallback flag is set.
 
-The host-prelude failure now names whether allocator reset, list reset,
-barrier recording, twin-copy recording, or list close failed, and reports the
-number of pre-copy barriers, final barriers, and texture-twin copies. The next
-run can therefore distinguish the exact failing operation and include the
+The host-prelude failure now names whether allocator reset, command-list reset,
+or list close failed, and reports the number of pre-copy barriers, final
+barriers, and texture-twin copies for context. Barrier and copy recording APIs
+return no error, so they are not reported as separate failure stages. The next
+run can therefore distinguish the failing D3D12 operation and include the
 debug layer's first validation message. This is a targeted mitigation and
 diagnostic improvement, not a claim that this particular OOM is fixed.
 
