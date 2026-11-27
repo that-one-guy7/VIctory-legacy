@@ -102,13 +102,9 @@ if ($UseLowVramProfile) {
         VICTORY_WIDE_BACK = "1"
         VICTORY_WIDE_MERGE = "1"
         VICTORY_WIDE_REFRESH = "1"
-        # This profile is intentionally aggressive for 4 GB-class adapters.
-        # These only affect eligible host-side resources; the title's own
-        # resource descriptions and required mesh/indirect allocations remain intact.
-        # The log showed 2560x1440 host targets and a 3.6 GB GPU allocation
-        # on a 4 GB adapter. Half-size eligible targets use one quarter
-        # of the pixel area while the title still presents at 1280x720.
-        VICTORY_RENDER_SCALE = "0.5"
+        # Render-target scaling remains opt-in: mixed-scale copies can be
+        # skipped and may leave missing or stale output. Keep native dimensions.
+        VICTORY_RENDER_SCALE = "1.0"
         VICTORY_RENDER_SCALE_MIN_SIZE = "512"
         # Drop one additional top mip from eligible large sampled textures.
         VICTORY_TEXTURE_MIP_DROP = "3"
@@ -150,26 +146,6 @@ if ($UseLowVramProfile) {
         $env:VICTORY_CARD_BUFFERS = "1"
         $env:VICTORY_CARD_BUFFERS_MIN_MB = "64"
         $env:VICTORY_CARD_BUFFERS_MB = "128"
-    }
-
-    # A prior shell session can leave VICTORY_RENDER_SCALE=1.0 behind. The
-    # diagnostic low-VRAM profile clamps it to a safe eligible-target scale;
-    # use VICTORY_RENDER_SCALE_OVERRIDE=1 to run a deliberate A/B test above 0.5.
-    if ($ProfileName -eq "diag" -and $env:VICTORY_RENDER_SCALE_OVERRIDE -ne "1") {
-        $ScaleValue = 0.0
-        $ScaleText = [Environment]::GetEnvironmentVariable("VICTORY_RENDER_SCALE", "Process")
-        $ScaleValid = [double]::TryParse(
-            $ScaleText,
-            [Globalization.NumberStyles]::Float,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [ref]$ScaleValue
-        )
-        if (!$ScaleValid -or $ScaleValue -lt 0.25 -or $ScaleValue -gt 0.5) {
-            if ($ScaleText -ne "0.5") {
-                Write-Warning "Clamping VICTORY_RENDER_SCALE='$ScaleText' to 0.5 for the diag low-VRAM profile. Set VICTORY_RENDER_SCALE_OVERRIDE=1 to bypass this guard."
-            }
-            $env:VICTORY_RENDER_SCALE = "0.5"
-        }
     }
 
     # Per-list GPU timing fences every host list and severely reduced GPU
