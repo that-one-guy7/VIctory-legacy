@@ -3959,7 +3959,14 @@ impl Host {
     /// Runs closed lists and waits for them, and with [`late`] for
     /// everything sent to the card before them, which is settled first.
     pub(crate) fn execute(&self, runs: &[&HostList]) {
-        let _ = self.submit(runs, false);
+        let _ = self.submit(runs, false, false);
+    }
+
+    /// Runs title command lists. Descriptor heaps can be changed by the
+    /// title through direct memory writes, which are reconciled while the
+    /// submission lock is held and before these lists reach the card.
+    pub(crate) fn execute_title(&self, runs: &[&HostList]) {
+        let _ = self.submit(runs, false, true);
     }
 
     /// A queue's submission with [`late`]: the host lists `lists`, taken
@@ -3976,7 +3983,7 @@ impl Host {
         late_threads();
         let sent = {
             let runs: Vec<&HostList> = order.iter().map(|&i| lists[i].host()).collect();
-            self.submit(&runs, true)
+            self.submit(&runs, true, true)
         };
         let Some((mut submitted, sent)) = sent else {
             // (Not reached: a submission sent ahead always comes back.)
@@ -4024,7 +4031,7 @@ impl Host {
     /// it ran and was waited for after all.
     fn execute_own(&self, list: &HostList) -> u64 {
         late_threads();
-        let Some((submitted, sent)) = self.submit(&[list], true) else {
+        let Some((submitted, sent)) = self.submit(&[list], true, false) else {
             return 0;
         };
         let number = sent.number;
@@ -4208,7 +4215,12 @@ impl Host {
     /// [`Host::execute_late`]: the lists are prepared and sent, and what is
     /// to be done once they have run comes back with the submission lock
     /// still held.
-    fn submit<'a>(&'a self, input_runs: &[&HostList], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+    fn submit<'a>(
+        &'a self,
+        input_runs: &[&HostList],
+        late: bool,
+        title_submission: bool,
+    ) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
         // Avoid allocating on the normal path; build a filtered view only
         // when D3D12 actually rejected one or more lists at Close.
         let has_failed = input_runs.iter().any(|run| run.close_failed());
@@ -4242,7 +4254,10 @@ impl Host {
         // Flights in the air ([`late`]): a submission that is waited for
         // settles them first, one sent ahead only if preparing it reads
         // what they write.
-        if !late {
+        // Resynchronizing a title descriptor heap changes host memory that
+        // previously submitted GPU work may still read. Even when the
+        // optional late-submit path is enabled, finish that work first.
+        if !late || title_submission {
             self.settle(&mut submitted, WHY_SYNC);
         } else if let Some(why) = late_blocked(runs) {
             if relay_exact() && why == WHY_READ {
@@ -4252,6 +4267,9 @@ impl Host {
             } else {
                 self.settle(&mut submitted, why);
             }
+        }
+        if title_submission {
+            crate::descriptor::resync_title_writes();
         }
         let behind = late && flying();
         // Before this submission counts as started: what the sweep lets go

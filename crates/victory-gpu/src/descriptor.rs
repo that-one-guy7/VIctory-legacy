@@ -59,6 +59,11 @@ pub(crate) struct Heap {
     host: std::sync::OnceLock<Option<host::HostHeap>>,
     #[cfg(windows)]
     pending: std::sync::Mutex<Vec<u32>>,
+    /// Last write-watch asking reflected in the host heap. The title can
+    /// write whole descriptor slots into its own heap memory without using
+    /// a Create/CopyDescriptor call; those writes are mirrored at submission.
+    #[cfg(windows)]
+    synced: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) fn heap<'a>(this: This) -> &'a Heap {
@@ -960,6 +965,8 @@ pub(crate) extern "system" fn create_heap(
         host: std::sync::OnceLock::new(),
         #[cfg(windows)]
         pending: Default::default(),
+        #[cfg(windows)]
+        synced: std::sync::atomic::AtomicU64::new(0),
     });
     #[cfg(windows)]
     if visible {

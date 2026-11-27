@@ -157,7 +157,29 @@ cache, and a 70% local-memory threshold for optional UAV optimizations. The
 low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
 compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
 system. This can lengthen asset streaming and shader warm-up; explicit
-environment overrides remain available. The smaller grid aims to trim unused
+environment overrides remain available. ### Conservative LDS fixes for 32-lane hosts
+
+Some console wave64 compute programs are refused by D3D12 adapters whose
+widest wave is 32 lanes. Two deliberately narrow recovery checks are
+available for controlled tests; both are **off by default**:
+
+- `VICTORY_LDS_EXACT=1` permits a lane-branch region with LDS reads and
+  writes only when static analysis can prove the operations do not need
+  ordering on the same LDS dword. Unknown addresses remain conservative.
+- `VICTORY_LDS_FLAGS=1` permits only a region that raises one constant LDS
+  flag, has no other side effects, and leaves no live register values
+  dependent on the timing of the flag read.
+
+These checks are not general Wave64 emulation. They do not fix shaders that
+depend on cross-half lane reads, lane masks, dynamic LDS addresses, or other
+unsupported wave64 operations. The upstream tests that motivated them
+recovered specific compute pipelines `369cbe906ea72764` and
+`2cc4c197ee29e291` on other 32-lane NVIDIA GPUs; that is not a guarantee
+for this build or adapter. Enable one switch at a time first and compare
+both visuals and stability. The synthetic tests cover the supported
+patterns, but physical GPU validation is still required.
+
+The smaller grid aims to trim unused
 tails of host copies, but can create more overlapping windows; memory and
 frame-time measurements must verify the trade-off. Native render-target
 dimensions are intentional: the GTX 1050 Ti

@@ -165,7 +165,7 @@ fn submit_cut(this: This, lists: &[This]) {
             .iter()
             .filter_map(|&l| crate::list::host_list(l))
             .collect();
-        host.execute(&now);
+        host.execute_title(&now);
         // They have run: their descriptor tables' slots are free again, as
         // on the path without cuts ([`execute`]). This path replaced that
         // one without the call, so the lists that run at once kept their
@@ -240,7 +240,7 @@ fn submit_split(this: This, lists: &[This]) {
             .iter()
             .filter_map(|&l| crate::list::host_list(l))
             .collect();
-        host.execute(&now);
+        host.execute_title(&now);
     }
     if cut < lists.len() {
         static SEEN: AtomicU64 = AtomicU64::new(0);
@@ -381,7 +381,7 @@ pub(crate) fn release_held(all: bool) {
                                     order.iter().map(|&i| lists[i].host()).collect();
                                 match crate::host::host() {
                                     Some(host) => {
-                                        host.execute(&runs);
+                                        host.execute_title(&runs);
                                         true
                                     }
                                     None => false,
@@ -571,7 +571,7 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
             .iter()
             .filter_map(|&l| crate::list::host_list(l))
             .collect();
-        host.execute(&host_lists);
+        host.execute_title(&host_lists);
         crate::list::tables_done(lists);
         // What the lists wrote at the bottom of the pipe may be a fence
         // another queue waits for.
