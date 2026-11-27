@@ -216,13 +216,11 @@ failure report names the exact recording step and counts its barriers and
 texture-twin copies. These changes improve the evidence and reduce expected
 VRAM pressure; they do **not** claim that the latest OOM is already resolved.
 
-For the next diagnostics build, the low-VRAM launcher now sets
-VICTORY_INPLACE_PROBE=2 by default (unless explicitly overridden). The
-probe tests whether this driver can expose eligible title-owned private memory
-directly to D3D12, and records memory eligibility/census results at 30 and 150
-seconds. It does not enable VICTORY_INPLACE; that option pins title-owned
-pages and can change memory lifetime, so it should only be enabled after the
-probe shows that the driver supports it and enough memory is eligible.
+The in-place memory probe remains opt-in for crash-reproduction runs:
+its periodic census and temporary heap-opening test add extra work and can
+temporarily keep title pages resident. VICTORY_INPLACE remains disabled.
+Only enable VICTORY_INPLACE_PROBE in a separate experiment when measuring
+whether this driver can expose eligible title-owned memory directly to D3D12.
 
 ### Compatibility-layer research
 
