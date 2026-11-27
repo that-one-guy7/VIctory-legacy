@@ -900,6 +900,14 @@ mod tests {
         meta[4..8].copy_from_slice(&meta_len.to_le_bytes());
         meta[8..12].copy_from_slice(&((code.len() / 4) as u32).to_le_bytes());
         meta[0x14] = 0x40;
+        // The metadata header names the first non-immediate root's user-data
+        // dword; immediate samplers carry their words in the shader itself.
+        meta[0x15] = roots
+            .iter()
+            .filter(|root| root.1 != 4)
+            .map(|root| root.2)
+            .min()
+            .unwrap_or(4);
         meta[0x16] = roots.len() as u8;
         for (i, &(kind, root, user_data, slot)) in roots.iter().enumerate() {
             let at = FSPX_RECORDS + FSPX_RECORD * i;
@@ -979,6 +987,43 @@ mod tests {
             ]
         );
         assert_eq!(program.used.len(), 2);
+    }
+
+    #[test]
+    fn parses_all_supported_fspx_root_kinds() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let part = fspx_with_roots(
+            &code,
+            &[
+                (0, 3, 4, 0),  // descriptor table
+                (2, 1, 6, 1),  // 64-bit root descriptor
+                (0, 5, 8, 2),  // resource heap
+                (1, 6, 10, 3), // sampler heap
+                (1, 4, 0, 4),  // immediate sampler
+            ],
+        );
+        let program = &native_programs(&part).unwrap()[0];
+        assert_eq!(
+            program.layout.iter().map(|p| (p.root, p.sgprs, p.user_data, p.slot)).collect::<Vec<_>>(),
+            [
+                (RootType::Table, 1, 4, 0),
+                (RootType::Descriptor, 2, 6, 1),
+                (RootType::ResourceHeap, 1, 8, 2),
+                (RootType::SamplerHeap, 1, 10, 3),
+            ]
+        );
+        assert_eq!(
+            program.used.iter().map(|u| u.root).collect::<Vec<_>>(),
+            [
+                RootType::Table,
+                RootType::Descriptor,
+                RootType::ResourceHeap,
+                RootType::SamplerHeap,
+                RootType::ImmediateSampler,
+            ]
+        );
+        assert_eq!(program.layout[0].base_register, 0);
+        assert_eq!(program.layout[1].base_register, 1);
     }
 
     #[test]
