@@ -107,8 +107,9 @@ if ($UseLowVramProfile) {
         VICTORY_TEXTURE_MIP_DROP_MIN_SIZE = "1024"
         # The regular window grid is 4 MiB; use 1 MiB for length-bounded host copies.
         VICTORY_WINDOW_KB = "1024"
-        # Batch clamping for adjacent one-record indirect draws (bounded at 64 records).
-        VICTORY_INDIRECT_WINDOW = "1"
+        # Keep indirect-window batching opt-in: a comparable NVIDIA fork reported
+        # D3D12 device-hung/MMU-fault failures with this path enabled.
+        VICTORY_INDIRECT_WINDOW = "0"
         VICTORY_MESH_LOCAL_BUDGET_MB = "128"
         # Keep only a small idle shared-scratch cache on systems with limited RAM.
         VICTORY_MESH_SHARED_SPARE_MB = "32"
