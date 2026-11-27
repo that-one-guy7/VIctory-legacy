@@ -26,6 +26,9 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// Placed slots logically cleared while GPU submissions are in flight;
+    /// their shader-visible descriptors are overwritten once the GPU is idle.
+    pending_unmake: Mutex<Vec<(u32, u64)>>,
     /// The host resource each slot views, held while the slot does: shaders
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
@@ -627,6 +630,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            pending_unmake: Mutex::default(),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             next: Mutex::new((0, vec![false; DYNAMIC as usize])),
             free: std::sync::atomic::AtomicU32::new(DYNAMIC),
@@ -865,8 +869,19 @@ impl HostHeap {
         true
     }
 
+    /// Writes a null descriptor for `key` at slot `index` and releases the
+    /// kept resource reference. Caller guarantees no GPU submission reads it.
+    fn unmake_key(&self, index: u32, key: u64) {
+        match view_at(key as u32, (key >> 32) as u32) {
+            Some(view) => null_for(&view, self.cpu(index)),
+            None => null_view(self.cpu(index)),
+        }
+        self.keep(index, None);
+    }
+
     /// Makes host slot `index` null again, as it is before its view is
-    /// made: a null view of the kind it held.
+    /// made: a null view of the kind it held. Defers descriptor writes while
+    /// GPU submissions are executing so shader warps cannot read a torn slot.
     fn unmake(&self, made: &mut [u64], index: u32) {
         let Some(key) = made.get_mut(index as usize).map(std::mem::take) else {
             return;
@@ -874,11 +889,34 @@ impl HostHeap {
         if key == 0 {
             return;
         }
-        match view_at(key as u32, (key >> 32) as u32) {
-            Some(view) => null_for(&view, self.cpu(index)),
-            None => null_view(self.cpu(index)),
+        if crate::host::flying() {
+            self.pending_unmake
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((index, key));
+            return;
         }
-        self.keep(index, None);
+        self.unmake_key(index, key);
+    }
+
+    /// Flushes deferred unmakings once no GPU submission is executing.
+    /// Slots remade with a new view since the clear are left untouched.
+    pub(crate) fn flush_unmake(&self) -> usize {
+        if crate::host::flying() {
+            return 0;
+        }
+        let made = self.made.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = std::mem::take(
+            &mut *self.pending_unmake.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        let mut flushed = 0;
+        for (index, key) in pending {
+            if made.get(index as usize).is_some_and(|&current| current == 0) {
+                self.unmake_key(index, key);
+                flushed += 1;
+            }
+        }
+        flushed
     }
 
     /// Title slot `index` is a table's ([`HostHeap::tabled`]). `read`: a
@@ -1263,8 +1301,12 @@ impl HostHeap {
             // Not a view of ours (never written, or of a resource the
             // title released): nothing to read.
             if made[index as usize] != 0 {
-                made[index as usize] = 0;
-                self.make_null(index);
+                if self.sampler {
+                    made[index as usize] = 0;
+                    self.make_null(index);
+                } else {
+                    self.unmake(&mut made, index);
+                }
                 let _ = self.note_buffer(index, None, false);
             } else if for_draw {
                 // Left for later and stale since: out of the sets and the stride table.
@@ -2591,5 +2633,24 @@ mod tests {
         heap.release(a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+
+    #[test]
+    fn deferred_unmake_flushes_only_still_cleared_slots() {
+        let Some(heap) = HostHeap::new(false, 8) else {
+            return; // no host GPU
+        };
+        {
+            let mut made = heap.made.lock().unwrap_or_else(|e| e.into_inner());
+            made[1] = 0; // remains cleared -> should flush
+            made[2] = 42; // overwritten with a new view -> must be skipped
+        }
+        heap.pending_unmake
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend([(1, 100), (2, 200)]);
+        assert_eq!(heap.flush_unmake(), 1);
+        assert_eq!(heap.flush_unmake(), 0);
+        assert_eq!(heap.made.lock().unwrap_or_else(|e| e.into_inner())[2], 42);
     }
 }
