@@ -17,6 +17,8 @@ pub struct FourCC(pub [u8; 4]);
 
 impl FourCC {
     pub const DXIL: FourCC = FourCC(*b"DXIL");
+    /// Native compute programs compiled outside DXIL (FSPX).
+    pub const ACCC: FourCC = FourCC(*b"ACCC");
     pub const STAT: FourCC = FourCC(*b"STAT");
     pub const RTS0: FourCC = FourCC(*b"RTS0");
     pub const PSV0: FourCC = FourCC(*b"PSV0");
@@ -129,8 +131,7 @@ pub(crate) fn u64_at(data: &[u8], at: usize) -> Result<u64, ShaderError> {
         .ok_or(ShaderError::Malformed("truncated"))
 }
 
-/// Builds a container from parts (test helper).
-#[cfg(test)]
+/// Builds a DXBC container from FourCC-tagged parts.
 pub fn build(parts: &[(FourCC, &[u8])]) -> Vec<u8> {
     let table = HEADER_SIZE + 4 * parts.len();
     let total = table + parts.iter().map(|(_, d)| 8 + d.len()).sum::<usize>();
