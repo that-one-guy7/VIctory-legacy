@@ -393,6 +393,14 @@ unsafe impl Send for Job {}
 
 /// The scheduler, with its workers started on first use; `None` if not
 /// even one worker could start.
+/// Bounds the DirectStorage worker pool to the processors available to this process.
+/// The environment override limits background decompression on low-memory systems;
+/// the default preserves the previous one-worker-per-logical-processor behavior.
+fn worker_count(logical: usize, requested: Option<usize>) -> usize {
+    let logical = logical.max(1);
+    requested.map_or(logical, |count| count.clamp(1, logical))
+}
+
 fn scheduler() -> Option<&'static Scheduler> {
     static SCHEDULER: OnceLock<Option<Scheduler>> = OnceLock::new();
     static STARTED: std::sync::Once = std::sync::Once::new();
@@ -420,7 +428,11 @@ fn scheduler() -> Option<&'static Scheduler> {
         })
         .as_ref()?;
     STARTED.call_once(|| {
-        let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let configured = std::env::var("VICTORY_DSTORAGE_WORKERS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        let workers = worker_count(logical, configured);
         let started = (0..workers)
             .filter(|i| {
                 std::thread::Builder::new()
@@ -429,7 +441,7 @@ fn scheduler() -> Option<&'static Scheduler> {
                     .is_ok()
             })
             .count();
-        tracing::info!(workers = started, "dstorage: workers");
+        tracing::info!(logical_processors = logical, workers = started, "dstorage: workers");
     });
     Some(scheduler)
 }
@@ -1022,6 +1034,16 @@ mod tests {
 
     use super::*;
     use crate::modules::xgameruntime::method;
+
+    #[test]
+    fn dstorage_worker_count_respects_the_process_limit() {
+        assert_eq!(worker_count(8, None), 8);
+        assert_eq!(worker_count(8, Some(3)), 3);
+        assert_eq!(worker_count(8, Some(0)), 1);
+        assert_eq!(worker_count(8, Some(32)), 8);
+        assert_eq!(worker_count(1, Some(3)), 1);
+        assert_eq!(worker_count(0, None), 1);
+    }
 
     fn call<F: Copy>(object: *mut c_void, slot: usize) -> F {
         // SAFETY: every object here starts with the runtime header.
