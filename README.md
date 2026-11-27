@@ -153,9 +153,10 @@ the lowest to highest asked address within those windows totaled about
 1,694 MiB. The implementation defaults to a 4 MiB grid for length-bounded
 windows and documents 1 MiB as a way to end windows nearer the requested
 ranges. The low-VRAM launcher now uses 1 MiB for those length-bounded windows;
-root-view asks without a length still use 4 MiB. A smaller grid can create more
-overlapping windows and duplicate copies, so this is a measured trade-off to
-verify in the next run, not a guaranteed memory reduction.
+the 432 asks without a length (about 1,728 MiB in this run) remain on the
+fixed 4 MiB root-view grid. A smaller grid can create more overlapping windows
+and duplicate copies, so this is a measured trade-off to verify in the next
+run, not a guaranteed memory reduction.
 
 The launcher header showed that no low-VRAM profile overrides or
 `VICTORY_D3D12_DEBUG` setting were active: only DRED was enabled. The runtime
