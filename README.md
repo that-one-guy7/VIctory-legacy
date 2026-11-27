@@ -168,9 +168,14 @@ it for controlled A/B tests as described in `docs/render-resolution-scale.md`. T
 `1280x720`, three dropped top mip levels on eligible large sampled textures,
 indirect-window batching disabled by default (`VICTORY_INDIRECT_WINDOW=0`),
 a 1 MiB grid for length-bounded title-memory windows
-(`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
-128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
-cache, and a 70% local-memory threshold for optional UAV optimizations. The
+(`VICTORY_WINDOW_KB=1024`), plus 256 KiB-aligned tails for unsized root views
+(`VICTORY_WINDOW_TAILS=1`; the tail still ends at the 4 MiB cell boundary).
+Tails avoid copying the unused prefix before a root-view address, but a later
+request at a lower address can create a longer replacement window until the
+old one is no longer referenced. Set `VICTORY_WINDOW_TAILS=0` for an A/B
+comparison. The profile also uses a 128 MiB aggregate local mesh-scratch cap,
+a 32 MiB idle shared-scratch reuse cache, and a 70% local-memory threshold for
+optional UAV optimizations. The
 low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
 compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
 system. These settings reduce some avoidable memory/copy overhead but cannot
