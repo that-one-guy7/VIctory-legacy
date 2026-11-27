@@ -2190,10 +2190,19 @@ impl State {
                 let used = entries.iter().find(|u| u.table_offset_dwords / 8 == k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
                     Some(View::Constant(address, size)) => {
-                        let Some((gpu, to)) = list.scratch(u64::from(size)) else {
-                            host.make_null(index);
+                        let Some(cbv_size) = crate::descriptor::host::constant_buffer_size(size) else {
+                            host.null_constant_at(index);
                             continue;
                         };
+                        let Some((gpu, to)) = list.scratch(u64::from(cbv_size)) else {
+                            host.null_constant_at(index);
+                            continue;
+                        };
+                        // The CBV exposes the rounded extent. Scratch chunks are
+                        // reused, so clear the whole extent before the deferred
+                        // title-memory copy fills the actual bytes.
+                        // SAFETY: scratch() returns a mapped region of at least cbv_size bytes.
+                        unsafe { std::ptr::write_bytes(to, 0, cbv_size as usize) };
                         list.defer_fill(to, address as *const u8, size as usize);
                         host.constant_at(index, gpu, size);
                     }
