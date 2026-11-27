@@ -11665,5 +11665,5 @@ fn interp_mode(kind: Barycentric) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[path = "lower/tests.rs"]
+#[path = "lower_tests.rs"]
 mod tests;
