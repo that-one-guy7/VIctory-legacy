@@ -123,6 +123,32 @@ These changes can reduce image quality and performance, do not cap every
 D3D12 allocation, and do not guarantee correct rendering or playable
 performance.
 
+### Black 3D output follow-up (2026-11-26 23:10 local / -06:00)
+
+The latest run is not a swap-chain-only failure. It recorded 935 shader
+translation failures (933 compute), 16,384 calls through still-unimplemented
+device slot `0x1c8`, and nine pixel-shader attempts rejected because this
+adapter does not support barycentrics. The FSPX parser accounted for 491
+failures with a generic unsupported-root-type error. This patch recognizes
+the resource-heap and sampler-heap root kinds as one-dword heap base
+parameters, matching the existing resource tracer's 32-bit address handling,
+and reports the raw root-type value for any remaining unsupported kind.
+Parser tests cover both supported heap kinds and an unsupported value.
+
+The same run reached 3,706 MiB of local GPU usage against a 3,403 MiB budget,
+with 740 MiB of physical memory free near the end. The D3D12 device was
+removed with `DXGI_ERROR_DEVICE_HUNG` after 15 submissions / 138 lists were
+in flight. The diagnostic low-VRAM profile now caps the in-flight list count
+at 64 (`VICTORY_LATE_WAIT_LISTS=64`) while retaining asynchronous overlap.
+This is intended to limit transient command/descriptor/resource retention;
+it can introduce more waits if the GPU cannot keep up.
+
+This is a targeted follow-up, not yet a complete black-scene fix. Slot
+`0x1c8` remains unimplemented, the remaining compute translation errors
+still need individual support, and barycentric-dependent pixel shaders are
+still refused on adapters without that feature. No claim is made that all 3D
+lighting will render until a new GTX 1050 Ti run confirms it.
+
 ### Native FSPX compute pipelines and frame overlap
 
 The Xbox D3D12 device method at slot `0x218` is
