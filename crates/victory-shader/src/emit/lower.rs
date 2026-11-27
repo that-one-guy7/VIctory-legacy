@@ -1348,7 +1348,13 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
         }
     }
     let exact = std::env::var_os("VICTORY_LDS_EXACT").is_some_and(|value| value == "1");
-    let flags_on = std::env::var_os("VICTORY_LDS_FLAGS").is_some_and(|value| value == "1");
+    let flags_on = std::env::var_os("VICTORY_LDS_FLAGS").is_some_and(|value| value == "1")
+        || {
+            #[cfg(test)]
+            { TEST_LDS_FLAGS.get() }
+            #[cfg(not(test))]
+            { false }
+        };
     for r in (0..n).filter(|&r| reads[r] && writes[r]) {
         let blocks: Vec<usize> = (0..n)
             .filter(|&b| !all[b] && find(&mut region, b) == r)
@@ -1502,6 +1508,11 @@ pub(super) fn host_max_wave() -> u32 {
 thread_local! {
     /// A test's host wave size, for its thread only ([`set_host_max_wave`] is the process's).
     pub(super) static TEST_HOST_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Enables the exact LDS-flag analysis for synthetic wave64 tests only.
+    pub(super) static TEST_LDS_FLAGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(super) fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
