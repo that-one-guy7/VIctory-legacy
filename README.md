@@ -149,8 +149,8 @@ fallback flag is required. Explicit `VICTORY_*` values take precedence.
 Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
 title-buffer shadows, native host render/depth target dimensions
 (`VICTORY_RENDER_SCALE=1.0`), three dropped top mip levels on eligible large
-sampled textures, batched validation for adjacent one-record indirect draws
-(`VICTORY_INDIRECT_WINDOW=1`), a 1 MiB grid for length-bounded title-memory windows
+sampled textures, with indirect-window batching disabled by default
+(`VICTORY_INDIRECT_WINDOW=0`; it remains available for explicit A/B testing), a 1 MiB grid for length-bounded title-memory windows
 (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
 128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
 cache, and a 70% local-memory threshold for optional UAV optimizations. The
