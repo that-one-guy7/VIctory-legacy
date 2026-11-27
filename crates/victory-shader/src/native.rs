@@ -493,12 +493,23 @@ pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
     let threads = |i: usize| u16_at(packet, PACKET_THREADS + 2 * i).map(u32::from);
     let mut layout: Vec<RootParam> = Vec::new();
     let mut used = Vec::new();
-    for e in meta
+    let records = meta
         .get(FSPX_RECORDS..)
         .unwrap_or(&[])
         .as_chunks::<FSPX_RECORD>()
-        .0
-    {
+        .0;
+    // FSPX root-constants records omit their dword count. The parameter
+    // occupies user SGPRs up to the next non-immediate parameter, or the
+    // final user SGPR declared by COMPUTE_PGM_RSRC2.USER_SGPR.
+    let rsrc2 = u32_at(packet, PACKET_RSRC2)?;
+    let user_sgprs = (rsrc2 >> 1) & 0x1f;
+    let starts: Vec<u8> = records
+        .iter()
+        .take_while(|e| e[0] != 0x43)
+        .filter(|e| e[0] == 0x41 && RootType::from_raw(e[5].into()) != RootType::ImmediateSampler)
+        .map(|e| e[21])
+        .collect();
+    for e in records {
         match e[0] {
             0x41 => {}
             0x42 => continue,
@@ -523,14 +534,23 @@ pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
             slot: e[22],
         };
         let sgprs = match root {
-            // All three are 32-bit heap/table base addresses in one user SGPR.
-            // The resource tracer already treats both dynamic heap roots as
-            // 32-bit addresses with a zero high half.
+            // These heap/table roots are 32-bit base addresses.
             RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap => 1,
             // A root descriptor is a 64-bit address in two user SGPRs.
             RootType::Descriptor => 2,
             // The code holds immediate sampler words; no user data is needed.
             RootType::ImmediateSampler => 0,
+            RootType::Constants => {
+                let end = starts
+                    .iter()
+                    .map(|&s| u32::from(s))
+                    .filter(|&s| s > u32::from(u.user_data))
+                    .min()
+                    .unwrap_or(user_sgprs);
+                end.checked_sub(u.user_data.into())
+                    .filter(|&n| n > 0)
+                    .ok_or(Malformed("FSPX root constants past the user SGPRs"))?
+            }
             _ => return Err(ShaderError::FspxRootType(e[5])),
         };
         if sgprs > 0 && !layout.iter().any(|p| p.slot == u.slot) {
@@ -552,7 +572,7 @@ pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
         layout,
         used,
         io: StageIo::Cs(ComputeIo {
-            rsrc2: u32_at(packet, PACKET_RSRC2)?,
+            rsrc2,
             threads: [threads(0)?, threads(1)?, threads(2)?],
         }),
         code: code.to_vec(),
@@ -886,13 +906,21 @@ mod tests {
 
     /// FSPX program with resource records supplied as (resource kind, root type, user-data dword, slot).
     fn fspx_with_roots(code: &[u8], roots: &[(u8, u8, u8, u8)]) -> Vec<u8> {
+        fspx_with_roots_and_rsrc2(code, 0x9c, roots)
+    }
+
+    fn fspx_with_roots_and_rsrc2(
+        code: &[u8],
+        rsrc2: u32,
+        roots: &[(u8, u8, u8, u8)],
+    ) -> Vec<u8> {
         let mut packet = vec![0u8; 0x1c];
         packet[0x0c..0x0e].copy_from_slice(&8u16.to_le_bytes());
         packet[0x0e..0x10].copy_from_slice(&16u16.to_le_bytes());
         packet[0x10..0x12].copy_from_slice(&1u16.to_le_bytes());
         packet[0x12..0x14].copy_from_slice(&PACKET_WAVE32.to_le_bytes());
         packet[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
-        packet[0x18..0x1c].copy_from_slice(&0x9cu32.to_le_bytes());
+        packet[0x18..0x1c].copy_from_slice(&rsrc2.to_le_bytes());
 
         let mut meta = vec![0u8; FSPX_RECORDS + FSPX_RECORD * (roots.len() + 1)];
         let meta_len = (meta.len() - 0x14) as u32;
@@ -1024,6 +1052,55 @@ mod tests {
         );
         assert_eq!(program.layout[0].base_register, 0);
         assert_eq!(program.layout[1].base_register, 1);
+    }
+
+    #[test]
+    fn fspx_root_constants_use_sgprs_up_to_the_next_parameter_or_limit() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+
+        // Two descriptor tables followed by constants: the constants consume
+        // the remaining six user SGPRs (6 through 11).
+        let last = fspx_with_roots_and_rsrc2(
+            &code,
+            12 << 1,
+            &[(0, 3, 4, 0), (0, 3, 5, 1), (2, 0, 6, 2)],
+        );
+        let last_program = &native_programs(&last).unwrap()[0];
+        assert_eq!(
+            last_program.layout.iter().map(|p| (p.root, p.sgprs, p.user_data, p.slot)).collect::<Vec<_>>(),
+            [
+                (RootType::Table, 1, 4, 0),
+                (RootType::Table, 1, 5, 1),
+                (RootType::Constants, 6, 6, 2),
+            ]
+        );
+
+        // Constants between a table and a 64-bit root descriptor stop at
+        // the descriptor's user-data start (7), so they occupy two SGPRs.
+        let middle = fspx_with_roots_and_rsrc2(
+            &code,
+            9 << 1,
+            &[(0, 3, 4, 0), (2, 0, 5, 1), (0, 1, 7, 2)],
+        );
+        let middle_program = &native_programs(&middle).unwrap()[0];
+        assert_eq!(
+            middle_program.layout.iter().map(|p| (p.root, p.sgprs, p.user_data, p.slot)).collect::<Vec<_>>(),
+            [
+                (RootType::Table, 1, 4, 0),
+                (RootType::Constants, 2, 5, 1),
+                (RootType::Descriptor, 2, 7, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_fspx_root_constants_outside_user_sgprs() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let part = fspx_with_roots_and_rsrc2(&code, 0, &[(2, 0, 4, 0)]);
+        assert_eq!(
+            native_programs(&part),
+            Err(ShaderError::Malformed("FSPX root constants past the user SGPRs"))
+        );
     }
 
     #[test]
