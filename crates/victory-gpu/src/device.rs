@@ -399,7 +399,6 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     E_NOTIMPL
 }
 
-
 /// Whether to try the native FSPX compute path. It remains experimental:
 /// untranslated native programs can replace the title's fallback path with
 /// valid guest pipelines that have no usable host pipeline.
@@ -503,7 +502,6 @@ mod tests {
         let hr = create(std::ptr::null(), &version, iid, &mut device);
         (hr, device)
     }
-
 
     #[test]
     fn native_fspx_compute_handler_requires_explicit_opt_in() {
