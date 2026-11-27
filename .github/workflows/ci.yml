@@ -79,6 +79,8 @@ jobs:
             'VICTORY_MESH_SHARED_SPARE_MB = "32"',
             'VICTORY_DSTORAGE_WORKERS = "3"',
             'VICTORY_PIPELINE_WORKERS = "2"',
+            'VICTORY_EXPERIMENTAL_FSPX = "0"',
+            '$env:VICTORY_EXPERIMENTAL_FSPX -eq "1"',
             '$UseGpuOverlap = ($env:VICTORY_GPU_OVERLAP -eq "1")',
             '$env:VICTORY_LATE_WAIT = "0"',
             '$env:VICTORY_RELAY = "0"',
