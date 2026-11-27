@@ -391,8 +391,6 @@ struct Job {
 // SAFETY: as for `Lane`.
 unsafe impl Send for Job {}
 
-/// The scheduler, with its workers started on first use; `None` if not
-/// even one worker could start.
 /// Bounds the DirectStorage worker pool to the processors available to this process.
 /// The environment override limits background decompression on low-memory systems;
 /// the default preserves the previous one-worker-per-logical-processor behavior.
@@ -401,6 +399,8 @@ fn worker_count(logical: usize, requested: Option<usize>) -> usize {
     requested.map_or(logical, |count| count.clamp(1, logical))
 }
 
+/// The scheduler, with its workers started on first use; `None` if not
+/// even one worker could start.
 fn scheduler() -> Option<&'static Scheduler> {
     static SCHEDULER: OnceLock<Option<Scheduler>> = OnceLock::new();
     static STARTED: std::sync::Once = std::sync::Once::new();
