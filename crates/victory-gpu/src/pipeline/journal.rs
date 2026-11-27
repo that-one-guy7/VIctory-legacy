@@ -40,7 +40,7 @@ const TRANSLATOR: &str = "# translator ";
 
 // The legacy shader crate does not export SOURCE_HASH. Bump this stamp
 // whenever a change to victory-shader can change emitted DXIL.
-const JOURNAL_TRANSLATOR: &str = "legacy-4924abb692bb15f2f4040984ddcd9e911db89e36";
+const JOURNAL_TRANSLATOR: &str = "legacy-vcvt-f32-f64-b4149d4bda2d3183b8aa8f5545ca9ca3aabcc58f";
 
 struct Journal {
     pending: PathBuf,
