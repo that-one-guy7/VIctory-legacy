@@ -153,11 +153,15 @@ and depth targets are scaled to at most half size unless
 buffers at least 64 MiB, with a 128 MiB aggregate cap
 (`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
 `VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`; and
-per-list GPU timing is disabled by default because its fence wait after every
-host list significantly reduced throughput. To opt into that diagnostic mode,
-set `VICTORY_GPU_TIMING_OVERRIDE=1`. The GPU-local buffer copies are only
-attempted while adapter budget checks permit them; if the budget is too tight,
-the runtime falls back to its ordinary CPU-backed copies. The preset otherwise
+host-list submissions are grouped in batches of two, with one fence wait per
+batch. The batch size can be changed to 1–16 with `VICTORY_GPU_BATCH_LISTS`; set
+`VICTORY_GPU_BATCH_LISTS_OVERRIDE=1` to prevent the diagnostic launcher from
+resetting it to two. Per-list GPU timing remains disabled by default because its
+fence wait after every host list significantly reduced throughput. To opt into
+that detailed TDR trace, set `VICTORY_GPU_TIMING_OVERRIDE=1`; timing then takes
+precedence over batching. The GPU-local buffer copies are only attempted while
+adapter budget checks permit them; if the budget is too tight, the runtime falls
+back to its ordinary CPU-backed copies. The preset otherwise
 uses title mode `1280x720`, three dropped top mip levels on eligible large
 sampled textures, indirect-window batching disabled by default
 (`VICTORY_INDIRECT_WINDOW=0`), a 1 MiB grid for length-bounded title-memory
