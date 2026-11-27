@@ -120,6 +120,18 @@ const CS_THREADS: usize = 0x28;
 const RECORD_LDS: usize = 0x4c;
 const MS_CLIP_CNTL: usize = 0x194;
 const MS_INFO: usize = 0x448;
+const FSPX_VERSION: u32 = 1;
+const FSPX_HEADER: usize = 0x10;
+const FSPX_PACKET: u32 = 0;
+const FSPX_CODE: u32 = 6;
+const FSPX_METADATA: u32 = 7;
+const PACKET_THREADS: usize = 0x0c;
+const PACKET_FLAGS: usize = 0x12;
+const PACKET_WAVE32: u16 = 1 << 4;
+const PACKET_RSRC1: usize = 0x14;
+const PACKET_RSRC2: usize = 0x18;
+const FSPX_RECORDS: usize = 0x18;
+const FSPX_RECORD: usize = 32;
 /// Unpacked blobs are a few KiB; refuse to allocate for absurd sizes.
 const MAX_UNPACKED: u64 = 16 << 20;
 
@@ -409,8 +421,12 @@ pub struct UsedResource {
     pub slot: u8,
 }
 
-/// The native programs in a `DXIL` part's data; empty for the PC layout.
+/// The native programs in a `DXIL` part's data, or the FSPX compute program
+/// in an `ACCC` part; empty for the PC layout.
 pub fn native_programs(part: &[u8]) -> Result<Vec<NativeProgram>, ShaderError> {
+    if part.starts_with(b"FSPX") {
+        return Ok(vec![fspx_program(part)?]);
+    }
     if part.get(XDAT_OFFSET..XDAT_OFFSET + 4) != Some(b"XDAT") {
         return Ok(Vec::new());
     }
@@ -430,6 +446,113 @@ pub fn native_programs(part: &[u8]) -> Result<Vec<NativeProgram>, ShaderError> {
         out.extend(programs(&unpack(blob)?)?);
     }
     Ok(out)
+}
+
+/// The compute program of an `ACCC` part, whose data is an FSPX
+/// packet, GFX10 machine code, and metadata describing its resources.
+pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
+    if u32_at(part, 4)? != FSPX_VERSION {
+        return Err(Malformed("unknown FSPX version"));
+    }
+    let count = u32_at(part, 8)? as usize;
+    if count > MAX_XDAT_ENTRIES {
+        return Err(Malformed("implausible FSPX entry count"));
+    }
+    let declared_size = u32_at(part, 12)? as usize;
+    if declared_size > part.len() || declared_size < FSPX_HEADER + 16 * count {
+        return Err(Malformed("FSPX container size disagrees"));
+    }
+    let part = &part[..declared_size];
+    let entry = |kind: u32| -> Result<&[u8], ShaderError> {
+        for i in 0..count {
+            let at = FSPX_HEADER + 16 * i;
+            if u32_at(part, at)? == kind {
+                let (offset, size) = (u32_at(part, at + 4)?, u32_at(part, at + 8)?);
+                return bytes(part, offset.into(), size.into())
+                    .ok_or(Malformed("FSPX entry out of bounds"));
+            }
+        }
+        Err(Malformed("FSPX entry missing"))
+    };
+    let packet = entry(FSPX_PACKET)?;
+    let code = entry(FSPX_CODE)?;
+    let meta = entry(FSPX_METADATA)?;
+    if packet.len() < 0x1c || meta.len() < FSPX_RECORDS {
+        return Err(Malformed("truncated FSPX packet or metadata"));
+    }
+    if code.is_empty() || code.len() % 4 != 0 {
+        return Err(Malformed("invalid FSPX code size"));
+    }
+    if u32_at(meta, 8)? as usize * 4 != code.len() {
+        return Err(Malformed("FSPX code size disagrees"));
+    }
+    let wave64 = u16_at(packet, PACKET_FLAGS)? & PACKET_WAVE32 == 0;
+    // VGPRs in granules of 4 (wave64) or 8 (wave32).
+    let granules = (u32_at(packet, PACKET_RSRC1)? & 0x3F) + 1;
+    let vgprs = (granules * if wave64 { 4 } else { 8 }).min(256) as u16;
+    let threads = |i: usize| u16_at(packet, PACKET_THREADS + 2 * i).map(u32::from);
+    let mut layout: Vec<RootParam> = Vec::new();
+    let mut used = Vec::new();
+    for e in meta
+        .get(FSPX_RECORDS..)
+        .unwrap_or(&[])
+        .as_chunks::<FSPX_RECORD>()
+        .0
+    {
+        match e[0] {
+            0x41 => {}
+            0x42 => continue,
+            0x43 => break,
+            _ => return Err(Malformed("unknown FSPX metadata record")),
+        }
+        let root = RootType::from_raw(e[5].into());
+        let u = UsedResource {
+            kind: match e[4] {
+                0 => ResourceType::Srv,
+                1 => ResourceType::Sampler,
+                2 => ResourceType::Cbv,
+                3 => ResourceType::Uav,
+                n => ResourceType::Other(n),
+            },
+            root,
+            table_offset_dwords: le32(e, 8),
+            lower_bound: le32(e, 12),
+            stride: 0,
+            dwords: e[20],
+            user_data: e[21],
+            slot: e[22],
+        };
+        let sgprs = match root {
+            RootType::Table => 1,
+            RootType::Descriptor => 2,
+            // The code holds its words; no user data.
+            RootType::ImmediateSampler => 0,
+            _ => return Err(Malformed("an FSPX resource of an unknown root type")),
+        };
+        if sgprs > 0 && !layout.iter().any(|p| p.slot == u.slot) {
+            layout.push(RootParam {
+                root,
+                table_offset_dwords: 0,
+                sgprs,
+                base_register: u.lower_bound,
+                user_data: u.user_data,
+                slot: u.slot,
+            });
+        }
+        used.push(u);
+    }
+    Ok(NativeProgram {
+        stage: HwStage::Cs,
+        wave64,
+        vgprs,
+        layout,
+        used,
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: u32_at(packet, PACKET_RSRC2)?,
+            threads: [threads(0)?, threads(1)?, threads(2)?],
+        }),
+        code: code.to_vec(),
+    })
 }
 
 fn unpack(blob: &[u8]) -> Result<Vec<u8>, ShaderError> {
@@ -755,6 +878,84 @@ mod tests {
             out.extend_from_slice(blob);
         }
         out
+    }
+
+    /// A minimal FSPX program with an empty resource list and a hash terminator.
+    fn fspx(code: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 0x1c];
+        packet[0x0c..0x0e].copy_from_slice(&8u16.to_le_bytes());
+        packet[0x0e..0x10].copy_from_slice(&16u16.to_le_bytes());
+        packet[0x10..0x12].copy_from_slice(&1u16.to_le_bytes());
+        packet[0x12..0x14].copy_from_slice(&PACKET_WAVE32.to_le_bytes());
+        packet[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+        packet[0x18..0x1c].copy_from_slice(&0x9cu32.to_le_bytes());
+
+        let mut meta = vec![0u8; FSPX_RECORDS + FSPX_RECORD];
+        meta[0..4].copy_from_slice(&0x403u32.to_le_bytes());
+        meta[4..8].copy_from_slice(&((meta.len() - 0x14) as u32).to_le_bytes());
+        meta[8..12].copy_from_slice(&((code.len() / 4) as u32).to_le_bytes());
+        meta[0x14] = 0x40;
+        meta[FSPX_RECORDS] = 0x43;
+
+        let blobs: [(u32, &[u8]); 4] = [
+            (FSPX_PACKET, &packet),
+            (1, &[0; 0x14]),
+            (FSPX_CODE, code),
+            (FSPX_METADATA, &meta),
+        ];
+        let mut out = vec![0u8; FSPX_HEADER + 16 * blobs.len()];
+        for (i, (kind, blob)) in blobs.iter().enumerate() {
+            let at = out.len().next_multiple_of(16);
+            out.resize(at, 0);
+            let entry = [
+                *kind,
+                at as u32,
+                blob.len() as u32,
+                0,
+            ];
+            for (j, word) in entry.iter().enumerate() {
+                out[FSPX_HEADER + 16 * i + 4 * j..FSPX_HEADER + 16 * i + 4 * (j + 1)]
+                    .copy_from_slice(&word.to_le_bytes());
+            }
+            out.extend_from_slice(blob);
+        }
+        let header = [
+            u32::from_le_bytes(*b"FSPX"),
+            FSPX_VERSION,
+            blobs.len() as u32,
+            out.len() as u32,
+        ];
+        for (i, word) in header.iter().enumerate() {
+            out[4 * i..4 * i + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn reads_fspx_compute_program() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let part = fspx(&code);
+        let programs = native_programs(&part).unwrap();
+        assert_eq!(programs.len(), 1);
+        let program = &programs[0];
+        assert_eq!(program.stage, HwStage::Cs);
+        assert!(!program.wave64);
+        assert_eq!(program.code, code);
+        assert_eq!(
+            program.io,
+            StageIo::Cs(ComputeIo { rsrc2: 0x9c, threads: [8, 16, 1] })
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_fspx_program() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let mut part = fspx(&code);
+        part.truncate(40);
+        assert!(native_programs(&part).is_err());
+        let mut part = fspx(&code);
+        part[4..8].copy_from_slice(&2u32.to_le_bytes());
+        assert!(native_programs(&part).is_err());
     }
 
     #[test]
