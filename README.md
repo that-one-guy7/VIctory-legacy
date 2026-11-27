@@ -147,17 +147,21 @@ crash-reproduction path because the runtime may select compute/vertex mesh
 fallback automatically when native mesh shaders are unavailable; no manual
 fallback flag is required. Explicit `VICTORY_*` values take precedence.
 Normal release launches are unchanged unless `VICTORY_MESH_FALLBACK=1` is set. The preset uses title mode `1280x720`, no extra GPU-local
-title-buffer shadows, native host render/depth target dimensions
-(`VICTORY_RENDER_SCALE=1.0`), three dropped top mip levels on eligible large
-sampled textures, with indirect-window batching disabled by default
+title-buffer shadows, half-size eligible host render/depth targets
+(`VICTORY_RENDER_SCALE=0.5`; explicit overrides are honored), three dropped
+top mip levels on eligible large sampled textures, with indirect-window batching disabled by default
 (`VICTORY_INDIRECT_WINDOW=0`; it remains available for explicit A/B testing), a 1 MiB grid for length-bounded title-memory windows
 (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
 128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
 cache, and a 70% local-memory threshold for optional UAV optimizations. The
 low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
 compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
-system. This can lengthen asset streaming and shader warm-up; explicit
-environment overrides remain available. ### Conservative LDS fixes for 32-lane hosts
+system. Diagnostic builds additionally default to `VICTORY_GPU_TIMING=1`, which
+submits and waits for each host list separately and records its GPU command
+timings; this trades throughput for smaller batches and more useful TDR
+diagnostics. Remove the variable from the process environment to disable it.
+This can lengthen asset streaming and shader warm-up; explicit environment
+overrides remain available. ### Conservative LDS fixes for 32-lane hosts
 
 Some console wave64 compute programs are refused by D3D12 adapters whose
 widest wave is 32 lanes. Two deliberately narrow recovery checks are
