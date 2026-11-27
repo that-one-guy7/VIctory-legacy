@@ -399,6 +399,39 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     E_NOTIMPL
 }
 
+
+/// Whether to try the native FSPX compute path. It remains experimental:
+/// untranslated native programs can replace the title's fallback path with
+/// valid guest pipelines that have no usable host pipeline.
+fn experimental_fspx_enabled_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn experimental_fspx_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        experimental_fspx_enabled_from(
+            std::env::var("VICTORY_EXPERIMENTAL_FSPX").ok().as_deref(),
+        )
+    })
+}
+
+/// Keep slot 0x218's native FSPX handler opt-in until its compute shader
+/// corpus translates reliably. The default preserves the previous
+/// E_NOTIMPL response, allowing the title to choose its fallback path.
+extern "system" fn deserialize_compute_experimental(
+    this: This,
+    desc: *const pipeline::DeserializeComputeHead,
+    iid: *const Iid,
+    out: *mut This,
+) -> HRESULT {
+    if experimental_fspx_enabled() {
+        pipeline::deserialize_compute_x(this, desc, iid, out)
+    } else {
+        unknown_pipeline::<0x218>(this, desc.cast(), iid, out)
+    }
+}
+
 /// IUnknown 3, object methods 4, device methods 76 (0x18-0x290), then the
 /// methods `ID3D12Device1` to `ID3D12Device8` add, in order: 3, 1, 3, 6, 9,
 /// 1, 2, 9 (0x298-0x3a0, the console's own among them), then those of
@@ -438,7 +471,7 @@ static FUNCTIONS: Table<160> = {
     f[57] = unknown_pipeline::<0x1c8> as *const (); // 0x1c8
     f[61] = descriptor::create_sampler_x as *const (); // 0x1e8
     f[62] = pipeline::create_compute_x as *const (); // 0x1f0
-    f[67] = pipeline::deserialize_compute_x as *const (); // 0x218
+    f[67] = deserialize_compute_experimental as *const (); // 0x218
     f[69] = object::ignore as *const (); // 0x228 debug error filter
     f[70] = descriptor::create_placed_srv as *const (); // 0x230
     f[71] = descriptor::create_placed_uav as *const (); // 0x238
@@ -469,6 +502,16 @@ mod tests {
         let mut device = std::ptr::null();
         let hr = create(std::ptr::null(), &version, iid, &mut device);
         (hr, device)
+    }
+
+
+    #[test]
+    fn native_fspx_compute_handler_requires_explicit_opt_in() {
+        assert!(!experimental_fspx_enabled_from(None));
+        assert!(!experimental_fspx_enabled_from(Some("0")));
+        assert!(!experimental_fspx_enabled_from(Some("true")));
+        assert!(!experimental_fspx_enabled_from(Some(" 1")));
+        assert!(experimental_fspx_enabled_from(Some("1")));
     }
 
     #[test]
