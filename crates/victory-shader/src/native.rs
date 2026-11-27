@@ -523,11 +523,15 @@ pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
             slot: e[22],
         };
         let sgprs = match root {
-            RootType::Table => 1,
+            // All three are 32-bit heap/table base addresses in one user SGPR.
+            // The resource tracer already treats both dynamic heap roots as
+            // 32-bit addresses with a zero high half.
+            RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap => 1,
+            // A root descriptor is a 64-bit address in two user SGPRs.
             RootType::Descriptor => 2,
-            // The code holds its words; no user data.
+            // The code holds immediate sampler words; no user data is needed.
             RootType::ImmediateSampler => 0,
-            _ => return Err(Malformed("an FSPX resource of an unknown root type")),
+            _ => return Err(ShaderError::FspxRootType(e[5])),
         };
         if sgprs > 0 && !layout.iter().any(|p| p.slot == u.slot) {
             layout.push(RootParam {
@@ -880,8 +884,8 @@ mod tests {
         out
     }
 
-    /// A minimal FSPX program with an empty resource list and a hash terminator.
-    fn fspx(code: &[u8]) -> Vec<u8> {
+    /// FSPX program with resource records supplied as (resource kind, root type, user-data dword, slot).
+    fn fspx_with_roots(code: &[u8], roots: &[(u8, u8, u8, u8)]) -> Vec<u8> {
         let mut packet = vec![0u8; 0x1c];
         packet[0x0c..0x0e].copy_from_slice(&8u16.to_le_bytes());
         packet[0x0e..0x10].copy_from_slice(&16u16.to_le_bytes());
@@ -890,13 +894,22 @@ mod tests {
         packet[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
         packet[0x18..0x1c].copy_from_slice(&0x9cu32.to_le_bytes());
 
-        let mut meta = vec![0u8; FSPX_RECORDS + FSPX_RECORD];
+        let mut meta = vec![0u8; FSPX_RECORDS + FSPX_RECORD * (roots.len() + 1)];
         let meta_len = (meta.len() - 0x14) as u32;
         meta[0..4].copy_from_slice(&0x403u32.to_le_bytes());
         meta[4..8].copy_from_slice(&meta_len.to_le_bytes());
         meta[8..12].copy_from_slice(&((code.len() / 4) as u32).to_le_bytes());
         meta[0x14] = 0x40;
-        meta[FSPX_RECORDS] = 0x43;
+        meta[0x16] = roots.len() as u8;
+        for (i, &(kind, root, user_data, slot)) in roots.iter().enumerate() {
+            let at = FSPX_RECORDS + FSPX_RECORD * i;
+            meta[at] = 0x41;
+            meta[at + 4] = kind;
+            meta[at + 5] = root;
+            meta[at + 12..at + 16].copy_from_slice(&(i as u32).to_le_bytes());
+            meta[at + 20..at + 23].copy_from_slice(&[4, user_data, slot]);
+        }
+        meta[FSPX_RECORDS + FSPX_RECORD * roots.len()] = 0x43;
 
         let blobs: [(u32, &[u8]); 4] = [
             (FSPX_PACKET, &packet),
@@ -908,12 +921,7 @@ mod tests {
         for (i, (kind, blob)) in blobs.iter().enumerate() {
             let at = out.len().next_multiple_of(16);
             out.resize(at, 0);
-            let entry = [
-                *kind,
-                at as u32,
-                blob.len() as u32,
-                0,
-            ];
+            let entry = [*kind, at as u32, blob.len() as u32, 0];
             for (j, word) in entry.iter().enumerate() {
                 out[FSPX_HEADER + 16 * i + 4 * j..FSPX_HEADER + 16 * i + 4 * (j + 1)]
                     .copy_from_slice(&word.to_le_bytes());
@@ -932,6 +940,10 @@ mod tests {
         out
     }
 
+    fn fspx(code: &[u8]) -> Vec<u8> {
+        fspx_with_roots(code, &[])
+    }
+
     #[test]
     fn reads_fspx_compute_program() {
         let code = [0x00, 0x00, 0x81, 0xBF];
@@ -945,6 +957,37 @@ mod tests {
         assert_eq!(
             program.io,
             StageIo::Cs(ComputeIo { rsrc2: 0x9c, threads: [8, 16, 1] })
+        );
+    }
+
+    #[test]
+    fn reads_dynamic_heap_roots_from_fspx_metadata() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let part = fspx_with_roots(
+            &code,
+            &[
+                (0, 5, 4, 1), // resource heap
+                (1, 6, 6, 2), // sampler heap
+            ],
+        );
+        let program = &native_programs(&part).unwrap()[0];
+        assert_eq!(
+            program.layout.iter().map(|p| (p.root, p.sgprs, p.user_data, p.slot)).collect::<Vec<_>>(),
+            [
+                (RootType::ResourceHeap, 1, 4, 1),
+                (RootType::SamplerHeap, 1, 6, 2),
+            ]
+        );
+        assert_eq!(program.used.len(), 2);
+    }
+
+    #[test]
+    fn reports_the_raw_unsupported_fspx_root_type() {
+        let code = [0x00, 0x00, 0x81, 0xBF];
+        let part = fspx_with_roots(&code, &[(0, 2, 4, 0)]);
+        assert_eq!(
+            native_programs(&part),
+            Err(ShaderError::FspxRootType(2))
         );
     }
 
