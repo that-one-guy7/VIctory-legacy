@@ -147,29 +147,31 @@ crash-reproduction path because the runtime may select compute/vertex mesh
 fallback automatically when native mesh shaders are unavailable; no manual
 fallback flag is required. Most preset values still honour explicit process
 settings. The diagnostic low-VRAM profile has three deliberate exceptions to
-avoid stale values defeating the tested throughput settings: GPU-local shadows
-are enabled only for title buffers at least 64 MiB, with a 128 MiB aggregate
-cap (`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
-`VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`;
-host-list submissions are grouped in batches of two, with one fence wait per
-batch; and per-list GPU timing is disabled by default. The batch size can be changed to 1–16 with `VICTORY_GPU_BATCH_LISTS`; set
+avoid stale values defeating the tested throughput settings. First, GPU-local
+shadows are enabled only for title buffers at least 64 MiB, with a 128 MiB
+aggregate cap (`VICTORY_CARD_BUFFERS=1`, `VICTORY_CARD_BUFFERS_MIN_MB=64`,
+`VICTORY_CARD_BUFFERS_MB=128`), unless `VICTORY_CARD_BUFFERS_OVERRIDE=1`.
+Allocation still passes the runtime's adapter-budget checks; when there is no
+room, the runtime keeps its ordinary CPU-backed path. Second, host-list
+submissions are grouped in batches of two, with one fence wait per batch. The
+batch size can be changed to 1–16 with `VICTORY_GPU_BATCH_LISTS`; set
 `VICTORY_GPU_BATCH_LISTS_OVERRIDE=1` to prevent the diagnostic launcher from
-resetting it to two. Render-target scaling remains at native size by default;
-the separate scaling experiment can skip mixed-size copies and produce missing
-or stale output, so only enable it for controlled A/B tests as described in
-`docs/render-resolution-scale.md`. Per-list GPU timing remains disabled by default because its
-fence wait after every host list significantly reduced throughput. To opt into
-that detailed TDR trace, set `VICTORY_GPU_TIMING_OVERRIDE=1`; timing then takes
-precedence over batching. The GPU-local buffer copies are only attempted while
-adapter budget checks permit them; if the budget is too tight, the runtime falls
-back to its ordinary CPU-backed copies. The preset otherwise
-uses title mode `1280x720`, three dropped top mip levels on eligible large
-sampled textures, indirect-window batching disabled by default
-(`VICTORY_INDIRECT_WINDOW=0`), a 1 MiB grid for length-bounded title-memory
-windows (`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows),
-a 128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch
-reuse cache, and a 70% local-memory threshold for optional UAV optimizations.
-The low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
+resetting it to two. Third, per-list GPU timing is disabled by default because
+its fence wait after every host list significantly reduced throughput. To opt
+into that detailed TDR trace, set `VICTORY_GPU_TIMING_OVERRIDE=1`; timing then
+takes precedence over batching.
+
+Render-target scaling remains at native size by default. The separate scaling
+experiment can skip mixed-size copies and produce missing or stale output, so
+only enable it for controlled A/B tests as described in
+`docs/render-resolution-scale.md`. The preset otherwise uses title mode
+`1280x720`, three dropped top mip levels on eligible large sampled textures,
+indirect-window batching disabled by default (`VICTORY_INDIRECT_WINDOW=0`),
+a 1 MiB grid for length-bounded title-memory windows
+(`VICTORY_WINDOW_KB=1024`; unsized root views retain 4 MiB windows), a
+128 MiB aggregate local mesh-scratch cap, a 32 MiB idle shared-scratch reuse
+cache, and a 70% local-memory threshold for optional UAV optimizations. The
+low-VRAM profile also limits DirectStorage to 3 workers and host pipeline
 compilation to 2 workers, leaving CPU headroom for the title on an 8-thread
 system. These settings reduce some avoidable memory/copy overhead but cannot
 cap every D3D12 allocation or guarantee a stable frame rate on a 4 GB adapter. ### Conservative LDS fixes for 32-lane hosts
